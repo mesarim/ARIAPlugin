@@ -8,7 +8,7 @@
 //
 // Project: ARIA (Autonomous Reasoning and Intelligence Architecture)
 // Component: ARIAPlugin (Torch server plugin / Pulsar client plugin -- unified)
-// Version: v0.5.7-r7
+// Version: v0.6.0-r1
 // Author:  Michael John Roll
 // Build symbols:
 //   TORCH  -- compile as Torch dedicated-server plugin
@@ -46,7 +46,7 @@ using VRageMath;
 using SpaceEngineers.Game.ModAPI;
 
 // =============================================================================
-// ARIA Plugin v0.5.7-r7
+// Pidgeon v0.6.0-r1
 // =============================================================================
 // THREADING MODEL (critical -- this is why previous versions crashed):
 //
@@ -252,6 +252,9 @@ namespace ARIAPlugin
             // Key: "happy"/"sad"/"angry"/"neutral", Value: Base64-encoded image bytes
 
         // Node auto-registration -- dynamic bridge list built from ARIA Node clients
+        // System version -- must match bridge ARIA_SYSTEM_VERSION
+        private const string ARIA_SYSTEM_VERSION = "0.6.0";
+
         private static int  _registrationPort    = 8099;
         private static int  _sharedRelayPort     = 8100;  // single port for ALL relay connections
         private static bool _autoRegister        = true;
@@ -563,7 +566,7 @@ namespace ARIAPlugin
 
         public override void Dispose()
         {
-            AriaLog.Info("ARIA Plugin shutting down.");
+            AriaLog.Info("Pidgeon v0.6.0-r1 shutting down.");
             _httpTimer?.Stop();   _httpTimer?.Dispose();
             _healthTimer?.Stop(); _healthTimer?.Dispose();
             try { _registrationListener?.Stop(); } catch { }
@@ -658,7 +661,45 @@ namespace ARIAPlugin
                         return;
                     }
 
-                    // ── Activation name lock ──────────────────────────────────
+                    // ── Version handshake ─────────────────────────────────────
+                    // Check bridge system_version against plugin ARIA_SYSTEM_VERSION.
+                    // Major version mismatch = hard reject.
+                    // Minor mismatch = warn but allow (backwards compatible).
+                    var bridgeSystemVersion = ExtractJsonString(body, "system_version") ?? "";
+                    if (!string.IsNullOrEmpty(bridgeSystemVersion))
+                    {
+                        var pluginParts = ARIA_SYSTEM_VERSION.Split('.');
+                        var bridgeParts = bridgeSystemVersion.Split('.');
+                        bool majorMismatch = pluginParts.Length > 0 && bridgeParts.Length > 0 &&
+                                             pluginParts[0] != bridgeParts[0];
+                        bool minorMismatch = !majorMismatch &&
+                                             pluginParts.Length > 1 && bridgeParts.Length > 1 &&
+                                             pluginParts[1] != bridgeParts[1];
+
+                        if (majorMismatch)
+                        {
+                            resp.StatusCode = 426; // Upgrade Required
+                            var msg = $"{{\"error\":\"ARIA System version mismatch. Plugin={ARIA_SYSTEM_VERSION} Bridge={bridgeSystemVersion}. Major version incompatible -- update your bridge.\"}}";
+                            var errBytes = System.Text.Encoding.UTF8.GetBytes(msg);
+                            resp.ContentLength64 = errBytes.Length;
+                            await resp.OutputStream.WriteAsync(errBytes, 0, errBytes.Length);
+                            resp.Close();
+                            AriaLog.Error($"ARIA: Registration REJECTED -- version mismatch. Plugin={ARIA_SYSTEM_VERSION} Bridge={bridgeSystemVersion} Node={nodeId.Substring(0, 8)}");
+                            return;
+                        }
+                        else if (minorMismatch)
+                        {
+                            AriaLog.Warn($"ARIA: Version mismatch -- Plugin={ARIA_SYSTEM_VERSION} Bridge={bridgeSystemVersion} Node={nodeId.Substring(0, 8)} -- registering anyway (minor version).");
+                        }
+                        else
+                        {
+                            AriaLog.Info($"ARIA: Version handshake OK -- System {ARIA_SYSTEM_VERSION} Node={nodeId.Substring(0, 8)}");
+                        }
+                    }
+                    else
+                    {
+                        AriaLog.Warn($"ARIA: Node {nodeId.Substring(0, 8)} sent no system_version -- old bridge? Registering anyway.");
+                    }
                     // Reject registration if ActivationName is already claimed by
                     // a DIFFERENT connected node. Same node re-registering is fine.
                     if (!string.IsNullOrEmpty(activeName))
@@ -3127,7 +3168,7 @@ namespace ARIAPlugin
 
                 var pbT = pb as Sandbox.ModAPI.IMyTerminalBlock;
                 if (pbT != null)
-                    pbT.CustomData = $"ARIA_INSTALLED\nVersion:0.5.7-r7\nGrid:{grid.DisplayName}\nNodeId:{ownerBridge.NodeId}\nBridge:{ownerBridge.Name}";
+                    pbT.CustomData = $"ARIA_INSTALLED\nVersion:0.6.0-r1\nGrid:{grid.DisplayName}\nNodeId:{ownerBridge.NodeId}\nBridge:{ownerBridge.Name}";
 
                 // Auto-install PB script if file is loaded and PB is empty
                 bool hasScript = false;
@@ -4608,7 +4649,7 @@ namespace ARIAPlugin
                     "<?xml version=\"1.0\" encoding=\"utf-8\"?>",
                     "<ARIAConfig>",
                     "  <!--",
-                    "    ARIAPlugin v0.5.7-r7 -- Configuration",
+                    "    Pidgeon v0.6.0-r1 -- Configuration",
                     "    Motto: Keep it klean from Keen.",
                     "",
                     "    PORT LAYOUT:",
@@ -4717,7 +4758,7 @@ namespace ARIAPlugin
                 // ---- TOP: Setup guide (static) ----
                 var sb = new System.Text.StringBuilder();
                 sb.AppendLine("=== ARIA SETUP GUIDE ===");
-                sb.AppendLine("v0.5.7-r7  Bridge: " + BRIDGE_URL);
+                sb.AppendLine("v0.6.0-r1  Bridge: " + BRIDGE_URL);
                 sb.AppendLine("");
                 sb.AppendLine("--- REQUIRED BLOCKS ---");
                 sb.AppendLine("[RC]  Name: ARIA Core");
