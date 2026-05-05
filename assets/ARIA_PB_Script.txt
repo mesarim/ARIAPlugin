@@ -1,0 +1,1776 @@
+private string ARIA_FACE_NAME  => _prefix + " FACE";
+private string LCD_STATUS_NAME => _prefix + " STATUS";
+private string LCD_CREW_NAME   => _prefix + " CREW";
+private string PROJECTOR_NAME  => _prefix + " PROJECTOR";
+
+// Self-configuration -- prefix extracted from PB name at startup
+// "ARIA PB" -> "ARIA", "SERA PB" -> "SERA", "IRIS PB" -> "IRIS"
+private string _prefix = "ARIA";
+
+// Block intent labels -- player names these, PB renames with prefix
+// e.g. "[STATUS]" -> "ARIA STATUS", "[FACE]" -> "ARIA FACE"
+private static readonly System.Collections.Generic.Dictionary<string, string> INTENT_SUFFIXES
+    = new System.Collections.Generic.Dictionary<string, string>
+{
+    { "[STATUS]",      " STATUS"           },
+    { "[FACE]",        " FACE"             },
+    { "[CREW]",        " CREW"             },
+    { "[SCAN]",        " SCAN"             },
+    { "[SCAN GRIDS]",  " SCAN GRIDS"       },
+    { "[SCAN ASTEROIDS]", " SCAN ASTEROIDS"},
+    { "[TAGGED]",      " TAGGED"           },
+
+    { "[PRESENCE]",    " PRESENCE"         },
+    { "[INSTRUCTIONS]"," INSTRUCTIONS"     },
+};
+
+// Block type auto-rename -- find by type, rename with prefix
+// Only renames if block has a generic/default name (no custom name set)
+private static readonly System.Collections.Generic.Dictionary<string, string> TYPE_RENAMES
+    = new System.Collections.Generic.Dictionary<string, string>
+{
+    // These get renamed regardless of current name
+};
+
+private string PrefixedName(string suffix) { return _prefix + " " + suffix; }
+private string PrefixedNameRaw(string raw)  { return _prefix + raw; }
+
+private const float THRESHOLD_PCT    = 2.0f;
+private const float THRESHOLD_SPEED  = 1.0f;
+private const int   THRESHOLD_BLOCKS = 1;
+
+private float _lastH2Pct              = -999f;
+private float _lastBatPct             = -999f;
+private float _lastReactorLoad        = -999f;
+private int   _lastMissingBlocks      = -999;
+private int   _lastDamagedBlocks      = -999;
+private int   _lastThrustersFunctional = -999;
+private float _lastSpeed              = -999f;
+private int   _updateCount            = 0;
+private bool  _forceUpdate            = true;
+
+// Override state tracking
+private bool  _gyroOverrideActive     = false;
+private bool  _thrusterOverrideActive = false;
+
+public Program()
+{
+    Runtime.UpdateFrequency = UpdateFrequency.Update100;
+
+    // Extract prefix from own name: "ARIA PB" -> "ARIA", "SERA PB" -> "SERA"
+    var pbName = Me.CustomName ?? "AI PB";
+    var spaceIdx = pbName.IndexOf(' ');
+    _prefix = spaceIdx > 0 ? pbName.Substring(0, spaceIdx).ToUpper().Trim() : "ARIA";
+    Echo("Prefix: " + _prefix);
+}
+
+public void Main(string argument, UpdateType updateSource)
+{
+    if (!string.IsNullOrEmpty(argument))
+    {
+        HandleCommand(argument);
+        return;
+    }
+
+    _updateCount++;
+    var data    = CollectShipData();
+    bool changed = HasSignificantChange(data);
+
+    if (changed || _forceUpdate || _updateCount % 30 == 0)
+    {
+        WriteStatusLCD(data);
+        _forceUpdate = false;
+        StoreLastValues(data);
+    }
+
+    WriteCrewLCD();
+}
+
+// ============================================================
+// COMMAND HANDLER
+// ============================================================
+
+private void HandleCommand(string cmd)
+{
+    // Echo received command for debugging -- visible in PB terminal
+    Echo("CMD: " + cmd);
+
+    // Commands arrive as "COMMAND:param" or "COMMAND:axis:value"
+    // Split on first colon only for the command name,
+    // pass remainder as param to allow colons in params
+    int firstColon = cmd.IndexOf(':');
+    string command = firstColon >= 0
+        ? cmd.Substring(0, firstColon).ToUpper().Trim()
+        : cmd.ToUpper().Trim();
+    string param = firstColon >= 0
+        ? cmd.Substring(firstColon + 1).Trim()
+        : "";
+
+    Echo("CMD parsed: [" + command + "] param: [" + param + "]");
+
+    switch (command)
+    {
+        case "FORCE_UPDATE":
+            _forceUpdate = true;
+            break;
+
+        case "SETUP":
+            RunSetup();
+            break;
+
+        case "THRUSTER_OVERRIDE":
+            SetThrusterOverride(param);
+            break;
+
+        case "GYRO_OVERRIDE":
+            SetGyroOverride(param == "on");
+            break;
+
+        case "GYRO_INPUT":
+            SetGyroInput(param);
+            break;
+
+        case "AUTOPILOT_WAYPOINT":
+            SetAutopilotWaypoint(param);
+            break;
+
+        case "STATUS":
+            _forceUpdate = true;
+            break;
+
+        case "CAMERA":
+            HandleCamera(param);
+            break;
+
+        case "PARACHUTE":
+            HandleParachute(param);
+            break;
+
+        case "WHEELS":
+            HandleWheels(param);
+            break;
+
+        case "DOOR":
+            HandleDoor(param);
+            break;
+
+        case "LANDING_GEAR":
+            HandleLandingGear(param);
+            break;
+
+        case "CONNECTOR":
+            HandleConnector(param);
+            break;
+
+        case "LIGHTS":
+            HandleLights(param);
+            break;
+
+        case "VENT":
+            HandleVent(param);
+            break;
+
+        case "GAS_TANK":
+            HandleGasTank(param);
+            break;
+
+        case "REACTOR":
+            HandleReactor(param);
+            break;
+
+        case "JUMP_DRIVE":
+            HandleJumpDrive(param);
+            break;
+
+        case "WARHEAD":
+            HandleWarhead(param);
+            break;
+
+        case "TURRET":
+            HandleTurret(param);
+            break;
+
+        case "DRILL":
+            HandleDrill(param);
+            break;
+
+        case "WELDER":
+            HandleWelder(param);
+            break;
+
+        case "GRINDER":
+            HandleGrinder(param);
+            break;
+
+        case "ANTENNA":
+            HandleAntenna(param);
+            break;
+
+        case "SENSOR":
+            HandleSensor(param);
+            break;
+
+        case "PISTON":
+            HandlePiston(param);
+            break;
+
+        case "ROTOR":
+            HandleRotor(param);
+            break;
+
+        case "SHIP_STATUS":
+            HandleShipStatus();
+            break;
+
+        case "EMOTION":
+            // Handled by {_prefix} EMOTION PB
+            break;
+
+        // FACE_ACTIONS diagnostic removed -- no longer needed
+    }
+}
+
+// ============================================================
+// THRUSTER OVERRIDE
+// param format: "all:20" | "fwd:10" | "up:50" | "all:0"
+// ============================================================
+
+private void SetThrusterOverride(string param)
+{
+    string[] parts = param.Split(':');
+    if (parts.Length < 2) return;
+
+    string direction = parts[0].ToLower().Trim();
+    float pct = 0f;
+    if (!float.TryParse(parts[1],
+        System.Globalization.NumberStyles.Float,
+        System.Globalization.CultureInfo.InvariantCulture,
+        out pct)) return;
+
+    float overrideValue = pct / 100f;
+
+    var thrusters = new List<IMyThrust>();
+    GridTerminalSystem.GetBlocksOfType(thrusters);
+
+    Vector3D gridFwd   = Me.CubeGrid.WorldMatrix.Forward;
+    Vector3D gridUp    = Me.CubeGrid.WorldMatrix.Up;
+    Vector3D gridRight = Me.CubeGrid.WorldMatrix.Right;
+
+    foreach (var thruster in thrusters)
+    {
+        bool apply = false;
+        if (direction == "all")
+        {
+            apply = true;
+        }
+        else
+        {
+            var thrustDir = -thruster.WorldMatrix.Forward;
+            double dotUp    = Vector3D.Dot(thrustDir, gridUp);
+            double dotFwd   = Vector3D.Dot(thrustDir, gridFwd);
+            double dotRight = Vector3D.Dot(thrustDir, gridRight);
+
+            string tDir;
+            if      (dotUp    >  0.7) tDir = "up";
+            else if (dotUp    < -0.7) tDir = "down";
+            else if (dotFwd   >  0.7) tDir = "fwd";
+            else if (dotFwd   < -0.7) tDir = "back";
+            else if (dotRight >  0.7) tDir = "right";
+            else                       tDir = "left";
+
+            apply = (tDir == direction);
+        }
+
+        if (apply)
+            thruster.ThrustOverridePercentage = overrideValue;
+    }
+
+    _thrusterOverrideActive = (pct > 0);
+    Echo("Thruster " + direction + " = " + pct + "%");
+    _forceUpdate = true;
+}
+
+// ============================================================
+// GYRO OVERRIDE -- enable/disable override mode
+// ============================================================
+
+private void SetGyroOverride(bool on)
+{
+    var gyros = new List<IMyGyro>();
+    GridTerminalSystem.GetBlocksOfType(gyros);
+    foreach (var gyro in gyros)
+    {
+        if (!on)
+        {
+            gyro.Yaw   = 0f;
+            gyro.Pitch = 0f;
+            gyro.Roll  = 0f;
+            gyro.GyroOverride = false;
+        }
+        else
+        {
+            gyro.GyroOverride = true;
+        }
+    }
+    _gyroOverrideActive = on;
+    Echo("Gyro override: " + (on ? "ON" : "OFF"));
+    _forceUpdate = true;
+}
+
+// ============================================================
+// GYRO INPUT -- set rotation rates on specific axes
+// param format: "yaw:0.30" | "pitch:-0.20" | "roll:0.10" | "stop"
+// Rate range: -1.0 (full CCW) to 1.0 (full CW)
+// ============================================================
+
+private void SetGyroInput(string param)
+{
+    var gyros = new List<IMyGyro>();
+    GridTerminalSystem.GetBlocksOfType(gyros);
+    if (gyros.Count == 0) { Echo("No gyros found."); return; }
+
+    if (param.Trim().ToLower() == "stop")
+    {
+        foreach (var gyro in gyros)
+        {
+            // Zero rates first, then disable override
+            // so the ship's flight assist resumes naturally
+            gyro.Yaw   = 0f;
+            gyro.Pitch = 0f;
+            gyro.Roll  = 0f;
+            gyro.GyroOverride = false;
+        }
+        Echo("Gyro override released. Flight assist resumed.");
+        _forceUpdate = true;
+        return;
+    }
+
+    int colonPos = param.IndexOf(':');
+    if (colonPos < 0) return;
+
+    string axis    = param.Substring(0, colonPos).ToLower().Trim();
+    string rateStr = param.Substring(colonPos + 1).Trim();
+
+    float rate = 0f;
+    if (!float.TryParse(rateStr,
+        System.Globalization.NumberStyles.Float,
+        System.Globalization.CultureInfo.InvariantCulture,
+        out rate)) return;
+
+    rate = Math.Max(-1.0f, Math.Min(1.0f, rate));
+
+    // Build desired angular velocity in SHIP world space
+    // based on the cockpit/RC orientation (what the player expects)
+    // Use ARIA Core block as the reference orientation
+    IMyShipController reference = GridTerminalSystem.GetBlockWithName(_prefix + " CORE") as IMyShipController;
+    if (reference == null)
+    {
+        // Fallback to any cockpit
+        var cockpits = new List<IMyShipController>();
+        GridTerminalSystem.GetBlocksOfType(cockpits);
+        if (cockpits.Count > 0) reference = cockpits[0];
+    }
+
+    foreach (var gyro in gyros)
+    {
+        gyro.GyroOverride = true;
+
+        if (reference == null)
+        {
+            // No reference block -- use gyro-local axes directly (may be misaligned)
+            switch (axis)
+            {
+                case "yaw":   gyro.Yaw   = rate; break;
+                case "pitch": gyro.Pitch = rate; break;
+                case "roll":  gyro.Roll  = rate; break;
+            }
+            continue;
+        }
+
+        // Transform desired rotation from reference (cockpit) space
+        // into gyro-local space so it matches what the player sees
+        //
+        // SE gyro convention (gyro-local):
+        //   Pitch = rotation around gyro's Right axis
+        //   Yaw   = rotation around gyro's Up axis
+        //   Roll  = rotation around gyro's Forward axis
+        //
+        // We want rotation around the REFERENCE block's axes instead.
+        // Project the reference axis onto each gyro axis to find components.
+
+        MatrixD refMatrix  = reference.WorldMatrix;
+        MatrixD gyroMatrix = gyro.WorldMatrix;
+
+        // Desired rotation axis in world space
+        Vector3D worldAxis;
+        switch (axis)
+        {
+            case "pitch": worldAxis = refMatrix.Right;   break;  // pitch = rotate around Right
+            case "yaw":   worldAxis = refMatrix.Up;      break;  // yaw   = rotate around Up
+            case "roll":  worldAxis = refMatrix.Forward; break;  // roll  = rotate around Forward
+            default:
+                Echo("Unknown axis: " + axis);
+                return;
+        }
+
+        // Desired angular velocity in world space
+        Vector3D worldAngVel = worldAxis * rate;
+
+        // Transform to gyro-local space
+        Vector3D localAngVel = Vector3D.TransformNormal(worldAngVel,
+            MatrixD.Transpose(gyroMatrix));
+
+        // Apply -- SE gyro local axes: Pitch=X, Yaw=Y, Roll=Z (negative forward)
+        gyro.Pitch = (float) localAngVel.X;
+        gyro.Yaw   = (float)-localAngVel.Y;
+        gyro.Roll  = (float)-localAngVel.Z;
+    }
+
+    Echo("Gyro " + axis + " = " + rate.ToString("F2") + " (world-space, ref: " +
+         (reference?.CustomName ?? "none") + ")");
+    _forceUpdate = true;
+}
+
+// ============================================================
+// AUTOPILOT WAYPOINT
+// param format: "x,y,z"
+// ============================================================
+
+private void SetAutopilotWaypoint(string coordStr)
+{
+    string[] parts = coordStr.Split(',');
+    if (parts.Length < 3) return;
+
+    double x, y, z;
+    if (!double.TryParse(parts[0], System.Globalization.NumberStyles.Float,
+        System.Globalization.CultureInfo.InvariantCulture, out x)) return;
+    if (!double.TryParse(parts[1], System.Globalization.NumberStyles.Float,
+        System.Globalization.CultureInfo.InvariantCulture, out y)) return;
+    if (!double.TryParse(parts[2], System.Globalization.NumberStyles.Float,
+        System.Globalization.CultureInfo.InvariantCulture, out z)) return;
+
+    var rcList = new List<IMyRemoteControl>();
+    GridTerminalSystem.GetBlocksOfType(rcList, b => b.IsFunctional);
+    if (rcList.Count == 0) { Echo("No Remote Control found."); return; }
+
+    var rcBlock = rcList[0];
+
+    // SE autopilot requires dampeners ON and RC block functional
+    // Pre-enable dampeners to ensure autopilot can engage
+    rcBlock.DampenersOverride = true;
+
+    rcBlock.ClearWaypoints();
+    rcBlock.AddWaypoint(new Vector3D(x, y, z), _prefix + " Waypoint");
+    rcBlock.SpeedLimit = 100f;  // cap speed for safety
+    rcBlock.FlightMode = FlightMode.OneWay;
+    rcBlock.SetAutoPilotEnabled(true);
+
+    Echo("Autopilot set: (" + x.ToString("F0") + "," + y.ToString("F0") + "," + z.ToString("F0") + ")");
+    Echo("RC: " + rcBlock.CustomName + " Functional:" + rcBlock.IsFunctional);
+    _forceUpdate = true;
+}
+
+// ============================================================
+// CAMERA CONTROL
+// Cameras can be enabled/disabled and listed
+// Note: SE does not allow viewport switching from PB scripts
+// ============================================================
+
+private void HandleCamera(string param)
+{
+    var cameras = new List<IMyCameraBlock>();
+    GridTerminalSystem.GetBlocksOfType(cameras);
+    if (cameras.Count == 0) { Echo("No cameras found."); return; }
+
+    param = param.ToLower().Trim();
+
+    if (param == "list")
+    {
+        Echo("Cameras (" + cameras.Count + "):");
+        foreach (var cam in cameras)
+            Echo("  " + cam.CustomName + " [" + (cam.IsActive ? "ACTIVE" : cam.Enabled ? "ON" : "OFF") + "]");
+        return;
+    }
+
+    bool enable = param == "on" || param == "enable";
+    bool disable = param == "off" || param == "disable";
+
+    if (enable || disable)
+    {
+        foreach (var cam in cameras)
+            cam.Enabled = enable;
+        Echo("Cameras " + (enable ? "enabled" : "disabled") + " (" + cameras.Count + ")");
+    }
+    _forceUpdate = true;
+}
+
+// ============================================================
+// PARACHUTE CONTROL
+// ============================================================
+
+private void HandleParachute(string param)
+{
+    var chutes = new List<IMyParachute>();
+    GridTerminalSystem.GetBlocksOfType(chutes);
+    if (chutes.Count == 0) { Echo("No parachutes found."); return; }
+
+    param = param.ToLower().Trim();
+
+    if (param == "deploy")
+    {
+        foreach (var chute in chutes)
+        {
+            chute.Enabled = true;
+            chute.OpenDoor(); // Deploy() is not available; OpenDoor triggers deployment
+        }
+        Echo("Parachutes deployed (" + chutes.Count + ").");
+    }
+    else if (param == "on" || param == "enable")
+    {
+        foreach (var chute in chutes) chute.Enabled = true;
+        Echo("Parachutes armed.");
+    }
+    else if (param == "off" || param == "disable")
+    {
+        foreach (var chute in chutes)
+        {
+            chute.CloseDoor();
+            chute.Enabled = false;
+        }
+        Echo("Parachutes disarmed.");
+    }
+    else if (param.StartsWith("auto:"))
+    {
+        float alt = 0f;
+        if (float.TryParse(param.Substring(5),
+            System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out alt))
+        {
+            foreach (var chute in chutes)
+                chute.AutoDeployHeight = alt;
+            Echo("Parachute auto-deploy set to " + alt.ToString("F0") + "m.");
+        }
+    }
+    _forceUpdate = true;
+}
+
+// ============================================================
+// WHEEL CONTROL
+// ============================================================
+
+private void HandleWheels(string param)
+{
+    var wheels = new List<IMyMotorSuspension>();
+    GridTerminalSystem.GetBlocksOfType(wheels);
+    if (wheels.Count == 0) { Echo("No wheels found."); return; }
+
+    param = param.ToLower().Trim();
+
+    if (param == "on" || param == "enable")
+    {
+        foreach (var w in wheels) w.Enabled = true;
+        Echo("Wheels enabled (" + wheels.Count + ").");
+    }
+    else if (param == "off" || param == "disable")
+    {
+        foreach (var w in wheels) w.Enabled = false;
+        Echo("Wheels disabled.");
+    }
+    else if (param == "brake:on")
+    {
+        foreach (var w in wheels) w.Brake = true;
+        Echo("Wheel brakes engaged.");
+    }
+    else if (param == "brake:off")
+    {
+        foreach (var w in wheels) w.Brake = false;
+        Echo("Wheel brakes released.");
+    }
+    else if (param.StartsWith("power:"))
+    {
+        float pct = 0f;
+        if (float.TryParse(param.Substring(6),
+            System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out pct))
+        {
+            pct = Math.Max(0f, Math.Min(100f, pct));
+            foreach (var w in wheels) w.Power = pct;
+            Echo("Wheel power set to " + pct.ToString("F0") + "%.");
+        }
+    }
+    // SteerAngle is read-only in PB API -- steering handled by player input
+    _forceUpdate = true;
+}
+
+// ============================================================
+// ARIA FACE -- Emotion Controller
+// Emotions 0-15 mapped to ARIA states
+// Named: ARIA Face
+// ============================================================
+
+
+// ============================================================
+// ARIA FACE -- Emotion display via LCD sprite drawing
+// Block: "ARIA FACE" (any LCD panel)
+// Uses MySprite DrawFrame API -- reliable, no image selection needed
+// Emote textures confirmed at: Textures\Models\Emotes\*.dds
+// ============================================================
+
+// Emotion display handled by {AI} EMOTION PB sprite renderer
+
+
+
+
+// ============================================================
+// DOOR CONTROL
+// param = "open" | "close" | "toggle" | "open:DoorName" | "close:DoorName"
+// ============================================================
+
+private void HandleDoor(string param)
+{
+    var p = param.ToLower().Trim();
+    string targetName = "";
+    string action = p;
+
+    // Support "open:AirlockDoor" syntax for named doors
+    if (p.Contains(":"))
+    {
+        var parts = p.Split(':');
+        action = parts[0].Trim();
+        targetName = param.Substring(param.IndexOf(':') + 1).Trim();
+    }
+
+    var doors = new List<IMyDoor>();
+    if (!string.IsNullOrEmpty(targetName))
+    {
+        var d = GridTerminalSystem.GetBlockWithName(targetName) as IMyDoor;
+        if (d != null) doors.Add(d);
+    }
+    else
+    {
+        GridTerminalSystem.GetBlocksOfType(doors);
+    }
+
+    if (doors.Count == 0) { Echo("No doors found."); return; }
+
+    foreach (var door in doors)
+    {
+        if (action == "open")        door.OpenDoor();
+        else if (action == "close")  door.CloseDoor();
+        else if (action == "toggle") { if (door.Status == DoorStatus.Open) door.CloseDoor(); else door.OpenDoor(); }
+    }
+    Echo($"Doors ({doors.Count}): {action}");
+    _forceUpdate = true;
+}
+
+// ============================================================
+// LANDING GEAR CONTROL
+// param = "lock" | "unlock" | "toggle" | "auto:on/off"
+// ============================================================
+
+private void HandleLandingGear(string param)
+{
+    var p = param.ToLower().Trim();
+    var gears = new List<IMyLandingGear>();
+    GridTerminalSystem.GetBlocksOfType(gears);
+    if (gears.Count == 0) { Echo("No landing gear found."); return; }
+
+    foreach (var gear in gears)
+    {
+        if (p == "lock")         gear.Lock();
+        else if (p == "unlock")  gear.Unlock();
+        else if (p == "toggle")  gear.ToggleLock();
+        else if (p == "auto:on") gear.AutoLock = true;
+        else if (p == "auto:off") gear.AutoLock = false;
+    }
+    Echo($"Landing gear ({gears.Count}): {p}");
+    _forceUpdate = true;
+}
+
+// ============================================================
+// CONNECTOR CONTROL
+// param = "connect" | "disconnect" | "toggle" | "throwout:on/off"
+// ============================================================
+
+private void HandleConnector(string param)
+{
+    var p = param.ToLower().Trim();
+    var connectors = new List<IMyShipConnector>();
+    GridTerminalSystem.GetBlocksOfType(connectors);
+    if (connectors.Count == 0) { Echo("No connectors found."); return; }
+
+    foreach (var conn in connectors)
+    {
+        if (p == "connect")            conn.Connect();
+        else if (p == "disconnect")    conn.Disconnect();
+        else if (p == "toggle")        conn.ToggleConnect();
+        else if (p == "throwout:on")   conn.ThrowOut = true;
+        else if (p == "throwout:off")  conn.ThrowOut = false;
+        else if (p == "collect:on")    conn.CollectAll = true;
+        else if (p == "collect:off")   conn.CollectAll = false;
+    }
+    Echo($"Connectors ({connectors.Count}): {p}");
+    _forceUpdate = true;
+}
+
+// ============================================================
+// LIGHTS CONTROL
+// param = "on" | "off" | "alert" | "normal" | "color:r,g,b"
+// ============================================================
+
+private void HandleLights(string param)
+{
+    var p = param.ToLower().Trim();
+    var lights = new List<IMyLightingBlock>();
+    GridTerminalSystem.GetBlocksOfType(lights);
+    if (lights.Count == 0) { Echo("No lights found."); return; }
+
+    foreach (var light in lights)
+    {
+        if (p == "on")        { light.Enabled = true; }
+        else if (p == "off")  { light.Enabled = false; }
+        else if (p == "alert")
+        {
+            light.Enabled = true;
+            light.Color   = new Color(255, 0, 0);
+            light.BlinkIntervalSeconds = 1.0f;
+            light.BlinkLength = 50f;
+        }
+        else if (p == "normal")
+        {
+            light.Color = new Color(255, 255, 255);
+            light.BlinkIntervalSeconds = 0f;
+            light.BlinkLength = 0f;
+        }
+        else if (p.StartsWith("color:"))
+        {
+            var parts = p.Substring(6).Split(',');
+            if (parts.Length == 3)
+            {
+                int r = 255, g = 255, b = 255;
+                int.TryParse(parts[0], out r);
+                int.TryParse(parts[1], out g);
+                int.TryParse(parts[2], out b);
+                light.Color = new Color(r, g, b);
+                light.Enabled = true;
+            }
+        }
+    }
+    Echo($"Lights ({lights.Count}): {p}");
+    _forceUpdate = true;
+}
+
+// ============================================================
+// AIR VENT CONTROL
+// param = "pressurise" | "depressurise" | "on" | "off" | "status"
+// ============================================================
+
+private void HandleVent(string param)
+{
+    var p = param.ToLower().Trim();
+    var vents = new List<IMyAirVent>();
+    GridTerminalSystem.GetBlocksOfType(vents);
+    if (vents.Count == 0) { Echo("No air vents found."); return; }
+
+    if (p == "status")
+    {
+        foreach (var vent in vents)
+            Echo($"{vent.CustomName}: {vent.Status} {vent.GetOxygenLevel()*100:F0}%");
+        return;
+    }
+
+    foreach (var vent in vents)
+    {
+        if (p == "pressurise" || p == "pressurize")
+        {
+            vent.Enabled = true;
+            vent.Depressurize = false;
+        }
+        else if (p == "depressurise" || p == "depressurize" || p == "vent")
+        {
+            vent.Enabled = true;
+            vent.Depressurize = true;
+        }
+        else if (p == "on")  vent.Enabled = true;
+        else if (p == "off") vent.Enabled = false;
+    }
+    Echo($"Vents ({vents.Count}): {p}");
+    _forceUpdate = true;
+}
+
+// ============================================================
+// GAS TANK CONTROL
+// param = "on" | "off" | "stockpile:on/off" | "status"
+// ============================================================
+
+private void HandleGasTank(string param)
+{
+    var p = param.ToLower().Trim();
+    var tanks = new List<IMyGasTank>();
+    GridTerminalSystem.GetBlocksOfType(tanks);
+    if (tanks.Count == 0) { Echo("No gas tanks found."); return; }
+
+    if (p == "status")
+    {
+        foreach (var tank in tanks)
+        {
+            string type = tank.BlockDefinition.SubtypeId.Contains("Hydrogen") ? "H2" : "O2";
+            Echo($"{tank.CustomName} [{type}]: {tank.FilledRatio*100:F0}%");
+        }
+        return;
+    }
+
+    foreach (var tank in tanks)
+    {
+        if (p == "on")              tank.Enabled = true;
+        else if (p == "off")        tank.Enabled = false;
+        else if (p == "stockpile:on")  tank.Stockpile = true;
+        else if (p == "stockpile:off") tank.Stockpile = false;
+    }
+    Echo($"Gas tanks ({tanks.Count}): {p}");
+    _forceUpdate = true;
+}
+
+// ============================================================
+// REACTOR CONTROL
+// param = "on" | "off" | "status"
+// ============================================================
+
+private void HandleReactor(string param)
+{
+    var p = param.ToLower().Trim();
+    var reactors = new List<IMyReactor>();
+    GridTerminalSystem.GetBlocksOfType(reactors);
+    if (reactors.Count == 0) { Echo("No reactors found."); return; }
+
+    if (p == "status")
+    {
+        foreach (var r in reactors)
+            Echo($"{r.CustomName}: {(r.Enabled ? "ON" : "OFF")} {r.CurrentOutput:F1}MW");
+        return;
+    }
+
+    foreach (var r in reactors)
+    {
+        if (p == "on")  r.Enabled = true;
+        else if (p == "off") r.Enabled = false;
+    }
+    Echo($"Reactors ({reactors.Count}): {p}");
+    _forceUpdate = true;
+}
+
+// ============================================================
+// JUMP DRIVE CONTROL
+// param = "on" | "off" | "recharge" | "jump" | "status"
+// ============================================================
+
+private void HandleJumpDrive(string param)
+{
+    var p = param.ToLower().Trim();
+    var drives = new List<IMyJumpDrive>();
+    GridTerminalSystem.GetBlocksOfType(drives);
+    if (drives.Count == 0) { Echo("No jump drives found."); return; }
+
+    if (p == "status")
+    {
+        foreach (var jd in drives)
+            Echo($"{jd.CustomName}: {jd.Status} {jd.CurrentStoredPower/jd.MaxStoredPower*100:F0}%");
+        return;
+    }
+
+    foreach (var jd in drives)
+    {
+        if (p == "on")        jd.Enabled = true;
+        else if (p == "off")  jd.Enabled = false;
+        else if (p == "recharge") { jd.Enabled = true; jd.Recharge = true; }
+        else if (p == "jump") jd.ApplyAction("Jump");
+    }
+    Echo($"Jump drives ({drives.Count}): {p}");
+    _forceUpdate = true;
+}
+
+// ============================================================
+// WARHEAD CONTROL
+// param = "arm" | "disarm" | "countdown:on/off" | "detonate"
+// Safety: detonate requires explicit "detonate" param only
+// ============================================================
+
+private void HandleWarhead(string param)
+{
+    var p = param.ToLower().Trim();
+    var warheads = new List<IMyWarhead>();
+    GridTerminalSystem.GetBlocksOfType(warheads);
+    if (warheads.Count == 0) { Echo("No warheads found."); return; }
+
+    foreach (var wh in warheads)
+    {
+        if (p == "arm")              wh.IsArmed = true;
+        else if (p == "disarm")      wh.IsArmed = false;
+        else if (p == "countdown:on")  wh.StartCountdown();
+        else if (p == "countdown:off") wh.StopCountdown();
+        else if (p == "detonate")
+        {
+            if (wh.IsArmed) wh.Detonate();
+            else Echo($"{wh.CustomName}: not armed, detonate ignored.");
+        }
+    }
+    Echo($"Warheads ({warheads.Count}): {p}");
+    _forceUpdate = true;
+}
+
+// ============================================================
+// TURRET CONTROL
+// param = "on" | "off" | "ai:on/off" | "target:meteors/missiles/smallships/largships/stations/characters"
+// ============================================================
+
+private void HandleTurret(string param)
+{
+    var p = param.ToLower().Trim();
+    var turrets = new List<IMyLargeTurretBase>();
+    GridTerminalSystem.GetBlocksOfType(turrets);
+    if (turrets.Count == 0) { Echo("No turrets found."); return; }
+
+    foreach (var t in turrets)
+    {
+        if (p == "on")         t.Enabled = true;
+        else if (p == "off")   t.Enabled = false;
+        else if (p == "ai:on") { t.Enabled = true; t.EnableIdleRotation = true; }
+        else if (p == "ai:off") t.EnableIdleRotation = false;
+        else if (p == "target:meteors")    t.ApplyAction("TargetMeteors_On");
+        else if (p == "target:missiles")   t.ApplyAction("TargetMissiles_On");
+        else if (p == "target:smallships") t.ApplyAction("TargetSmallShips_On");
+        else if (p == "target:largeships") t.ApplyAction("TargetLargeShips_On");
+        else if (p == "target:stations")   t.ApplyAction("TargetStations_On");
+        else if (p == "target:characters") t.ApplyAction("TargetCharacters_On");
+        else if (p == "target:clear")
+        {
+            t.ApplyAction("TargetMeteors_Off");
+            t.ApplyAction("TargetMissiles_Off");
+            t.ApplyAction("TargetSmallShips_Off");
+            t.ApplyAction("TargetLargeShips_Off");
+            t.ApplyAction("TargetStations_Off");
+            t.ApplyAction("TargetCharacters_Off");
+        }
+    }
+    Echo($"Turrets ({turrets.Count}): {p}");
+    _forceUpdate = true;
+}
+
+// ============================================================
+// DRILL CONTROL
+// param = "on" | "off"
+// ============================================================
+
+private void HandleDrill(string param)
+{
+    var p = param.ToLower().Trim();
+    var drills = new List<IMyShipDrill>();
+    GridTerminalSystem.GetBlocksOfType(drills);
+    if (drills.Count == 0) { Echo("No drills found."); return; }
+
+    foreach (var d in drills)
+    {
+        if (p == "on")  d.Enabled = true;
+        else if (p == "off") d.Enabled = false;
+    }
+    Echo($"Drills ({drills.Count}): {p}");
+    _forceUpdate = true;
+}
+
+// ============================================================
+// WELDER CONTROL
+// param = "on" | "off"
+// ============================================================
+
+private void HandleWelder(string param)
+{
+    var p = param.ToLower().Trim();
+    var welders = new List<IMyShipWelder>();
+    GridTerminalSystem.GetBlocksOfType(welders);
+    if (welders.Count == 0) { Echo("No welders found."); return; }
+
+    foreach (var w in welders)
+    {
+        if (p == "on")  w.Enabled = true;
+        else if (p == "off") w.Enabled = false;
+    }
+    Echo($"Welders ({welders.Count}): {p}");
+    _forceUpdate = true;
+}
+
+// ============================================================
+// GRINDER CONTROL
+// param = "on" | "off"
+// ============================================================
+
+private void HandleGrinder(string param)
+{
+    var p = param.ToLower().Trim();
+    var grinders = new List<IMyShipGrinder>();
+    GridTerminalSystem.GetBlocksOfType(grinders);
+    if (grinders.Count == 0) { Echo("No grinders found."); return; }
+
+    foreach (var g in grinders)
+    {
+        if (p == "on")  g.Enabled = true;
+        else if (p == "off") g.Enabled = false;
+    }
+    Echo($"Grinders ({grinders.Count}): {p}");
+    _forceUpdate = true;
+}
+
+// ============================================================
+// ANTENNA CONTROL
+// param = "on" | "off" | "range:N" | "broadcast:on/off"
+// ============================================================
+
+private void HandleAntenna(string param)
+{
+    var p = param.ToLower().Trim();
+    var antennas = new List<IMyRadioAntenna>();
+    GridTerminalSystem.GetBlocksOfType(antennas);
+    if (antennas.Count == 0) { Echo("No antennas found."); return; }
+
+    foreach (var a in antennas)
+    {
+        if (p == "on")              a.Enabled = true;
+        else if (p == "off")        a.Enabled = false;
+        else if (p == "broadcast:on")  a.EnableBroadcasting = true;
+        else if (p == "broadcast:off") a.EnableBroadcasting = false;
+        else if (p.StartsWith("range:"))
+        {
+            float range = 0f;
+            if (float.TryParse(p.Substring(6),
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out range))
+                a.Radius = range;
+        }
+    }
+    Echo($"Antennas ({antennas.Count}): {p}");
+    _forceUpdate = true;
+}
+
+// ============================================================
+// SENSOR CONTROL
+// param = "on" | "off" | "range:N"
+// ============================================================
+
+private void HandleSensor(string param)
+{
+    var p = param.ToLower().Trim();
+    var sensors = new List<IMySensorBlock>();
+    GridTerminalSystem.GetBlocksOfType(sensors);
+    if (sensors.Count == 0) { Echo("No sensors found."); return; }
+
+    foreach (var s in sensors)
+    {
+        if (p == "on")  s.Enabled = true;
+        else if (p == "off") s.Enabled = false;
+        else if (p.StartsWith("range:"))
+        {
+            float range = 0f;
+            if (float.TryParse(p.Substring(6),
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out range))
+            {
+                s.FrontExtend = range; s.BackExtend = range;
+                s.LeftExtend = range;  s.RightExtend = range;
+                s.TopExtend = range;   s.BottomExtend = range;
+            }
+        }
+    }
+    Echo($"Sensors ({sensors.Count}): {p}");
+    _forceUpdate = true;
+}
+
+// ============================================================
+// PISTON CONTROL
+// param = "extend" | "retract" | "stop" | "velocity:N" | "position:N"
+// ============================================================
+
+private void HandlePiston(string param)
+{
+    var p = param.ToLower().Trim();
+    var pistons = new List<IMyExtendedPistonBase>();
+    GridTerminalSystem.GetBlocksOfType(pistons);
+    if (pistons.Count == 0) { Echo("No pistons found."); return; }
+
+    foreach (var piston in pistons)
+    {
+        if (p == "extend")       piston.Extend();
+        else if (p == "retract") piston.Retract();
+        else if (p == "stop")    piston.Velocity = 0f;
+        else if (p.StartsWith("velocity:"))
+        {
+            float v = 0f;
+            if (float.TryParse(p.Substring(9),
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out v))
+                piston.Velocity = v;
+        }
+    }
+    Echo($"Pistons ({pistons.Count}): {p}");
+    _forceUpdate = true;
+}
+
+// ============================================================
+// ROTOR CONTROL
+// param = "on" | "off" | "rpm:N" | "lock" | "unlock" | "reverse"
+// ============================================================
+
+private void HandleRotor(string param)
+{
+    var p = param.ToLower().Trim();
+    var rotors = new List<IMyMotorStator>();
+    GridTerminalSystem.GetBlocksOfType(rotors);
+    if (rotors.Count == 0) { Echo("No rotors found."); return; }
+
+    foreach (var rotor in rotors)
+    {
+        if (p == "on")          rotor.Enabled = true;
+        else if (p == "off")    rotor.Enabled = false;
+        else if (p == "lock")   rotor.RotorLock = true;
+        else if (p == "unlock") rotor.RotorLock = false;
+        else if (p == "reverse") rotor.TargetVelocityRPM = -rotor.TargetVelocityRPM;
+        else if (p.StartsWith("rpm:"))
+        {
+            float rpm = 0f;
+            if (float.TryParse(p.Substring(4),
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out rpm))
+                rotor.TargetVelocityRPM = rpm;
+        }
+    }
+    Echo($"Rotors ({rotors.Count}): {p}");
+    _forceUpdate = true;
+}
+
+// ============================================================
+// SHIP STATUS SUMMARY
+// Comprehensive status report written to ARIA STATUS LCD
+// ============================================================
+
+private void HandleShipStatus()
+{
+    var sb = new System.Text.StringBuilder();
+
+    // Doors
+    var doors = new List<IMyDoor>();
+    GridTerminalSystem.GetBlocksOfType(doors);
+    if (doors.Count > 0)
+    {
+        int open = 0; foreach (var d in doors) if (d.Status == DoorStatus.Open) open++;
+        sb.Append($"doors:{doors.Count},open:{open};");
+    }
+
+    // Landing gear
+    var gears = new List<IMyLandingGear>();
+    GridTerminalSystem.GetBlocksOfType(gears);
+    if (gears.Count > 0)
+    {
+        int locked = 0; foreach (var g in gears) if (g.IsLocked) locked++;
+        sb.Append($"gear:{gears.Count},locked:{locked};");
+    }
+
+    // Connectors
+    var conns = new List<IMyShipConnector>();
+    GridTerminalSystem.GetBlocksOfType(conns);
+    if (conns.Count > 0)
+    {
+        int connected = 0;
+        foreach (var c in conns) if (c.Status == MyShipConnectorStatus.Connected) connected++;
+        sb.Append($"connectors:{conns.Count},connected:{connected};");
+    }
+
+    // Gas tanks
+    var tanks = new List<IMyGasTank>();
+    GridTerminalSystem.GetBlocksOfType(tanks);
+    if (tanks.Count > 0)
+    {
+        float totalH2 = 0, totalO2 = 0;
+        int h2count = 0, o2count = 0;
+        foreach (var t in tanks)
+        {
+            if (t.BlockDefinition.SubtypeId.Contains("Hydrogen"))
+            { totalH2 += (float)t.FilledRatio; h2count++; }
+            else { totalO2 += (float)t.FilledRatio; o2count++; }
+        }
+        if (h2count > 0) sb.Append($"h2:{totalH2/h2count*100:F0}%;");
+        if (o2count > 0) sb.Append($"o2:{totalO2/o2count*100:F0}%;");
+    }
+
+    // Jump drives
+    var jumps = new List<IMyJumpDrive>();
+    GridTerminalSystem.GetBlocksOfType(jumps);
+    if (jumps.Count > 0)
+    {
+        float charge = 0;
+        foreach (var j in jumps) charge += (float)(j.CurrentStoredPower / j.MaxStoredPower);
+        sb.Append($"jumpdrives:{jumps.Count},charge:{charge/jumps.Count*100:F0}%;");
+    }
+
+    Echo("SHIP_STATUS: " + sb.ToString());
+    _forceUpdate = true;
+}
+
+// ============================================================
+// AUTOPILOT CANCEL
+// ============================================================
+
+private void CancelAutopilot()
+{
+    var rcList = new List<IMyRemoteControl>();
+    GridTerminalSystem.GetBlocksOfType(rcList, r => r.IsFunctional);
+    foreach (var rc in rcList)
+    {
+        rc.SetAutoPilotEnabled(false);
+        rc.ClearWaypoints();
+    }
+    Echo("Autopilot cancelled. Manual control restored.");
+    _forceUpdate = true;
+}
+
+// ============================================================
+// RELEASE ALL OVERRIDES
+// ============================================================
+
+private void ReleaseAllOverrides()
+{
+    // Zero and release gyros
+    var gyros = new List<IMyGyro>();
+    GridTerminalSystem.GetBlocksOfType(gyros);
+    foreach (var gyro in gyros)
+    {
+        gyro.Yaw   = 0f;
+        gyro.Pitch = 0f;
+        gyro.Roll  = 0f;
+        gyro.GyroOverride = false;
+    }
+
+    // Clear all thruster overrides
+    var thrusters = new List<IMyThrust>();
+    GridTerminalSystem.GetBlocksOfType(thrusters);
+    foreach (var thr in thrusters)
+        thr.ThrustOverridePercentage = 0f;
+
+    // Cancel autopilot
+    CancelAutopilot();
+
+    Echo("All overrides released. Ship under manual control.");
+    _forceUpdate = true;
+}
+
+// ============================================================
+// DATA COLLECTION
+// ============================================================
+
+private ShipData CollectShipData()
+{
+    var d = new ShipData();
+
+    // -- Batteries --
+    var batteries = new List<IMyBatteryBlock>();
+    GridTerminalSystem.GetBlocksOfType(batteries);
+    float batStored = 0f, batMax = 0f;
+    foreach (var b in batteries) { batStored += b.CurrentStoredPower; batMax += b.MaxStoredPower; }
+    d.BatteryPct = batMax > 0 ? (batStored / batMax * 100f) : -1f;
+
+    // -- Reactors + H2 Engines --
+    var reactors = new List<IMyReactor>();
+    GridTerminalSystem.GetBlocksOfType(reactors);
+    float reactorOut = 0f, reactorMax = 0f;
+    foreach (var r in reactors) { reactorOut += r.CurrentOutput; reactorMax += r.MaxOutput; }
+
+    var h2engines = new List<IMyPowerProducer>();
+    GridTerminalSystem.GetBlocksOfType(h2engines,
+        e => e.BlockDefinition.TypeIdString.Contains("HydrogenEngine"));
+    foreach (var eng in h2engines) { reactorOut += eng.CurrentOutput; reactorMax += eng.MaxOutput; }
+
+    d.ReactorCount   = reactors.Count + h2engines.Count;
+    d.ReactorOutput  = reactorOut;
+    d.ReactorMax     = reactorMax;
+    d.ReactorLoadPct = reactorMax > 0 ? (reactorOut / reactorMax * 100f) : 0f;
+
+    // -- Hydrogen tanks --
+    var h2tanks = new List<IMyGasTank>();
+    GridTerminalSystem.GetBlocksOfType(h2tanks, t => t.BlockDefinition.SubtypeId.Contains("Hydrogen"));
+    float h2Stored = 0f, h2Max = 0f;
+    foreach (var t in h2tanks) { h2Stored += (float)(t.FilledRatio * t.Capacity); h2Max += t.Capacity; }
+    d.HydrogenPct   = h2Max > 0 ? (h2Stored / h2Max * 100f) : -1f;
+    d.HydrogenTanks = h2tanks.Count;
+
+    // -- Oxygen tanks --
+    var o2tanks = new List<IMyGasTank>();
+    GridTerminalSystem.GetBlocksOfType(o2tanks, t => !t.BlockDefinition.SubtypeId.Contains("Hydrogen"));
+    float o2Stored = 0f, o2Max = 0f;
+    foreach (var t in o2tanks) { o2Stored += (float)(t.FilledRatio * t.Capacity); o2Max += t.Capacity; }
+    d.OxygenPct   = o2Max > 0 ? (o2Stored / o2Max * 100f) : -1f;
+    d.OxygenTanks = o2tanks.Count;
+
+    // -- Thrusters --
+    var thrusters = new List<IMyThrust>();
+    GridTerminalSystem.GetBlocksOfType(thrusters);
+    d.ThrustersTotal     = thrusters.Count;
+    d.ThrustersFunctional = thrusters.Count(t => t.IsFunctional);
+    d.ThrustersDamaged   = d.ThrustersTotal - d.ThrustersFunctional;
+
+    Vector3D fwd   = Me.CubeGrid.WorldMatrix.Forward;
+    Vector3D up    = Me.CubeGrid.WorldMatrix.Up;
+    Vector3D right = Me.CubeGrid.WorldMatrix.Right;
+
+    foreach (var thr in thrusters)
+    {
+        if (!thr.IsWorking) continue;
+        var dir = -thr.WorldMatrix.Forward;
+        float thrust = thr.MaxEffectiveThrust;
+        if      (Vector3D.Dot(dir, up)    >  0.7) d.ThrustUp    += thrust;
+        else if (Vector3D.Dot(dir, up)    < -0.7) d.ThrustDown  += thrust;
+        else if (Vector3D.Dot(dir, fwd)   >  0.7) d.ThrustFwd   += thrust;
+        else if (Vector3D.Dot(dir, fwd)   < -0.7) d.ThrustBack  += thrust;
+        else if (Vector3D.Dot(dir, right) >  0.7) d.ThrustRight += thrust;
+        else                                        d.ThrustLeft  += thrust;
+    }
+
+    // -- Gyroscopes --
+    var gyros = new List<IMyGyro>();
+    GridTerminalSystem.GetBlocksOfType(gyros);
+    d.GyrosTotal      = gyros.Count;
+    d.GyrosFunctional = gyros.Count(g => g.IsWorking);
+
+
+    // Block inventory scan
+    var _doors = new List<IMyDoor>();
+    GridTerminalSystem.GetBlocksOfType(_doors);
+    d.Doors     = _doors.Count;
+    d.DoorsOpen = _doors.Count(x => x.Status == DoorStatus.Open);
+
+    var _gear = new List<IMyLandingGear>();
+    GridTerminalSystem.GetBlocksOfType(_gear);
+    d.LandingGear       = _gear.Count;
+    d.LandingGearLocked = _gear.Count(x => x.IsLocked);
+
+    var _conn = new List<IMyShipConnector>();
+    GridTerminalSystem.GetBlocksOfType(_conn);
+    d.Connectors       = _conn.Count;
+    d.ConnectorsLocked = _conn.Count(x => x.Status == MyShipConnectorStatus.Connected);
+
+    var _turrets = new List<IMyLargeTurretBase>();
+    GridTerminalSystem.GetBlocksOfType(_turrets);
+    d.Turrets        = _turrets.Count;
+    d.TurretsEnabled = _turrets.Count(x => x.Enabled);
+
+    var _drills = new List<IMyShipDrill>();
+    GridTerminalSystem.GetBlocksOfType(_drills);
+    d.Drills = _drills.Count;
+
+    var _welders = new List<IMyShipWelder>();
+    GridTerminalSystem.GetBlocksOfType(_welders);
+    d.Welders = _welders.Count;
+
+    var _grinders = new List<IMyShipGrinder>();
+    GridTerminalSystem.GetBlocksOfType(_grinders);
+    d.Grinders = _grinders.Count;
+
+    var _jumps = new List<IMyJumpDrive>();
+    GridTerminalSystem.GetBlocksOfType(_jumps);
+    d.JumpDrives = _jumps.Count;
+    if (_jumps.Count > 0)
+        d.JumpDriveCharge = (float)(_jumps.Average(x => x.CurrentStoredPower / x.MaxStoredPower) * 100f);
+
+    var _warheads = new List<IMyWarhead>();
+    GridTerminalSystem.GetBlocksOfType(_warheads);
+    d.Warheads = _warheads.Count;
+
+    var _cameras = new List<IMyCameraBlock>();
+    GridTerminalSystem.GetBlocksOfType(_cameras);
+    d.Cameras = _cameras.Count;
+
+    var _sensors = new List<IMySensorBlock>();
+    GridTerminalSystem.GetBlocksOfType(_sensors);
+    d.Sensors = _sensors.Count;
+
+    var _pistons = new List<IMyExtendedPistonBase>();
+    GridTerminalSystem.GetBlocksOfType(_pistons);
+    d.Pistons = _pistons.Count;
+
+    var _rotors = new List<IMyMotorStator>();
+    GridTerminalSystem.GetBlocksOfType(_rotors);
+    d.Rotors = _rotors.Count;
+
+    var _vents = new List<IMyAirVent>();
+    GridTerminalSystem.GetBlocksOfType(_vents);
+    d.AirVents = _vents.Count;
+
+    var _lights = new List<IMyLightingBlock>();
+    GridTerminalSystem.GetBlocksOfType(_lights);
+    d.Lights = _lights.Count;
+
+    var _antennas = new List<IMyRadioAntenna>();
+    GridTerminalSystem.GetBlocksOfType(_antennas);
+    d.Antennas = _antennas.Count;
+
+    // -- Mass and Speed --
+    var cockpits = new List<IMyCockpit>();
+    GridTerminalSystem.GetBlocksOfType(cockpits, c => c.IsUnderControl);
+    if (cockpits.Count > 0)
+    {
+        d.ShipMass  = cockpits[0].CalculateShipMass().TotalMass;
+        d.ShipSpeed = (float)cockpits[0].GetShipVelocities().LinearVelocity.Length();
+    }
+    else
+    {
+        var rcList = new List<IMyRemoteControl>();
+        GridTerminalSystem.GetBlocksOfType(rcList, r => r.IsFunctional);
+        if (rcList.Count > 0)
+        {
+            d.ShipMass  = rcList[0].CalculateShipMass().TotalMass;
+            d.ShipSpeed = (float)rcList[0].GetShipVelocities().LinearVelocity.Length();
+        }
+    }
+
+    // -- Gravity --
+    var controller = GridTerminalSystem.GetBlockWithName(_prefix + " CORE") as IMyShipController;
+    if (controller != null)
+        d.GravityMagnitude = (float)controller.GetNaturalGravity().Length();
+
+    // -- TWR --
+    if (d.GravityMagnitude > 0 && d.ShipMass > 0 && d.ThrustUp > 0)
+        d.TWR = d.ThrustUp / (d.ShipMass * d.GravityMagnitude);
+
+    // -- Blueprint integrity --
+    var proj = GridTerminalSystem.GetBlockWithName(PROJECTOR_NAME) as IMyProjector;
+    if (proj != null && proj.IsProjecting)
+    {
+        d.BlueprintTotal   = proj.TotalBlocks;
+        d.BlueprintMissing = proj.RemainingBlocks;
+        d.BlueprintArmor   = proj.RemainingArmorBlocks;
+        d.IntegrityPct     = d.BlueprintTotal > 0
+            ? (float)(d.BlueprintTotal - d.BlueprintMissing) / d.BlueprintTotal * 100f
+            : 100f;
+        d.HasProjector = true;
+    }
+
+    // -- Damaged block estimate from functional state --
+    // SlimBlock is not safely accessible in PB context.
+    // Derive damage counts from what we already have:
+    //   - Thrusters not working vs total
+    //   - Gyros not working vs total
+    //   - Blueprint missing blocks (structural damage)
+    d.DamagedBlocks = 0;
+    if (d.ThrustersDamaged > 0)
+        d.DamagedBlocks += d.ThrustersDamaged;
+    int gyrosDamaged = d.GyrosTotal - d.GyrosFunctional;
+    if (gyrosDamaged > 0)
+        d.DamagedBlocks += gyrosDamaged;
+    if (d.BlueprintMissing > 0)
+        d.DamagedBlocks += d.BlueprintMissing;
+    // Worst-block detail not available via this method
+    d.WorstBlockPct  = -1f;
+    d.WorstBlockName = "";
+
+    d.Timestamp = DateTime.Now.ToString("HH:mm:ss");
+    d.GridName  = Me.CubeGrid.DisplayName ?? "Unknown";
+
+    return d;
+}
+
+// ============================================================
+// CHANGE DETECTION
+// ============================================================
+
+private bool HasSignificantChange(ShipData d)
+{
+    if (Math.Abs(d.HydrogenPct    - _lastH2Pct)              > THRESHOLD_PCT)    return true;
+    if (Math.Abs(d.BatteryPct     - _lastBatPct)             > THRESHOLD_PCT)    return true;
+    if (Math.Abs(d.ReactorLoadPct - _lastReactorLoad)        > THRESHOLD_PCT)    return true;
+    if (Math.Abs(d.BlueprintMissing - _lastMissingBlocks)    > THRESHOLD_BLOCKS) return true;
+    if (Math.Abs(d.DamagedBlocks  - _lastDamagedBlocks)      > THRESHOLD_BLOCKS) return true;
+    if (Math.Abs(d.ThrustersFunctional - _lastThrustersFunctional) > 0)          return true;
+    if (Math.Abs(d.ShipSpeed      - _lastSpeed)              > THRESHOLD_SPEED)  return true;
+    return false;
+}
+
+private void StoreLastValues(ShipData d)
+{
+    _lastH2Pct               = d.HydrogenPct;
+    _lastBatPct              = d.BatteryPct;
+    _lastReactorLoad         = d.ReactorLoadPct;
+    _lastMissingBlocks       = d.BlueprintMissing;
+    _lastDamagedBlocks       = d.DamagedBlocks;
+    _lastThrustersFunctional = d.ThrustersFunctional;
+    _lastSpeed               = d.ShipSpeed;
+}
+
+// ============================================================
+// LCD WRITERS
+// ============================================================
+
+
+private void WriteStatusLCD(ShipData d)
+{
+    var lcd = GridTerminalSystem.GetBlockWithName(LCD_STATUS_NAME) as IMyTextPanel;
+    if (lcd == null) return;
+
+    var sb = new System.Text.StringBuilder();
+    sb.AppendLine("=== " + _prefix + " STATUS === " + d.Timestamp);
+    sb.AppendLine("Grid: " + d.GridName);
+    sb.AppendLine("Speed: " + d.ShipSpeed.ToString("F1") + " m/s  |  Mass: " + (d.ShipMass / 1000f).ToString("F0") + "t");
+    sb.AppendLine("Gravity: " + d.GravityMagnitude.ToString("F2") + " m/s2  |  TWR: " + d.TWR.ToString("F2"));
+    sb.AppendLine("---");
+    sb.AppendLine("H2 Fuel:   " + FormatBar(d.HydrogenPct) + " " + d.HydrogenPct.ToString("F0") + "%");
+    sb.AppendLine("Battery:   " + FormatBar(d.BatteryPct)  + " " + d.BatteryPct.ToString("F0")  + "%");
+    if (d.ReactorCount > 0)
+        sb.AppendLine("Power:     " + d.ReactorCount + " unit(s) @ " + d.ReactorLoadPct.ToString("F0") + "% load");
+    sb.AppendLine("---");
+    sb.AppendLine("Thrusters: " + d.ThrustersFunctional + "/" + d.ThrustersTotal +
+                  (d.ThrustersDamaged > 0 ? "  [" + d.ThrustersDamaged + " DAMAGED]" : " OK"));
+    sb.AppendLine("Gyros:     " + d.GyrosFunctional + "/" + d.GyrosTotal);
+    sb.AppendLine("---");
+    if (d.HasProjector)
+    {
+        sb.AppendLine("Hull:      " + d.IntegrityPct.ToString("F0") + "%  Missing: " + d.BlueprintMissing);
+        if (d.DamagedBlocks > 0)
+            sb.AppendLine("Damaged:   " + d.DamagedBlocks + " blocks  Worst: " + d.WorstBlockName + " " + d.WorstBlockPct.ToString("F0") + "%");
+    }
+    else
+    {
+        sb.AppendLine("Hull:      No projector linked");
+    }
+
+    lcd.ContentType = ContentType.TEXT_AND_IMAGE;
+    lcd.FontSize    = 0.7f;
+    lcd.WriteText(sb.ToString());
+}
+
+private void WriteCrewLCD()
+{
+    var lcd = GridTerminalSystem.GetBlockWithName(LCD_CREW_NAME) as IMyTextPanel;
+    if (lcd == null) return;
+
+    string current = lcd.GetText();
+    if (string.IsNullOrWhiteSpace(current) || !current.StartsWith("=== " + _prefix + " CREW"))
+    {
+        lcd.ContentType = ContentType.TEXT_AND_IMAGE;
+        lcd.FontSize    = 0.7f;
+        lcd.WriteText("=== " + _prefix + " CREW === " + DateTime.Now.ToString("HH:mm:ss") + "\n---\n(Crew vitals from " + _prefix + " sensor array)");
+    }
+}
+
+// ============================================================
+// HELPERS
+// ============================================================
+
+private string FormatBar(float pct)
+{
+    if (pct < 0) return "[----------]";
+    int filled = (int)(pct / 10f);
+    filled = Math.Max(0, Math.Min(10, filled));
+    return "[" + new string('#', filled) + new string('-', 10 - filled) + "]";
+}
+
+// ============================================================
+// SETUP -- self-configuration wizard
+// Run with argument "SETUP" to rename blocks with correct prefix.
+// Player should pre-label LCDs with intent tags like [STATUS], [FACE] etc.
+// ============================================================
+private void RunSetup()
+{
+    var sb = new System.Text.StringBuilder();
+    sb.AppendLine("=== " + _prefix + " SETUP ===");
+    sb.AppendLine("");
+
+    int renamed = 0;
+    int missing = 0;
+
+    // --- Auto-rename RC block -> PREFIX Core ---
+    var rcs = new System.Collections.Generic.List<IMyRemoteControl>();
+    GridTerminalSystem.GetBlocksOfType(rcs);
+    if (rcs.Count > 0)
+    {
+        rcs[0].CustomName = _prefix + " CORE";
+        sb.AppendLine("[OK] RC -> " + _prefix + " CORE");
+        renamed++;
+    }
+    else
+    {
+        sb.AppendLine("[!!] No Remote Control found");
+        missing++;
+    }
+
+    // --- Auto-rename Projector -> PREFIX Projector ---
+    var projs = new System.Collections.Generic.List<IMyProjector>();
+    GridTerminalSystem.GetBlocksOfType(projs);
+    if (projs.Count > 0)
+    {
+        projs[0].CustomName = _prefix + " PROJECTOR";
+        sb.AppendLine("[OK] Projector -> " + _prefix + " PROJECTOR");
+        renamed++;
+    }
+    else
+    {
+        sb.AppendLine("[-] No Projector (optional)");
+    }
+
+    // --- Auto-rename AI Basic block -> PREFIX AI ---
+    var allBlocks2 = new System.Collections.Generic.List<IMyTerminalBlock>();
+    GridTerminalSystem.GetBlocks(allBlocks2);
+    bool foundAi = false;
+    foreach (var b in allBlocks2)
+    {
+        // AI Basic blocks implement IMyFunctionalBlock but not other common interfaces
+        // Identify by block definition name containing "BasicMission" or "AI Basic"
+        var typeName = b.BlockDefinition.TypeIdString ?? "";
+        var subtypeName = b.BlockDefinition.SubtypeId ?? "";
+        if (typeName.Contains("BasicMission") || b.DefinitionDisplayNameText.Contains("AI Basic"))
+        {
+            b.CustomName = _prefix + " AI";
+            sb.AppendLine("[OK] AI Basic -> " + _prefix + " AI");
+            renamed++;
+            foundAi = true;
+            break;
+        }
+    }
+    if (!foundAi)
+        sb.AppendLine("[-] No AI Basic block found (optional - Automaton DLC)");
+
+    // --- Rename LCDs by intent tag ---
+    var lcds = new System.Collections.Generic.List<IMyTextPanel>();
+    GridTerminalSystem.GetBlocksOfType(lcds);
+
+    bool foundAnyIntentLcd = false;
+    foreach (var lcd in lcds)
+    {
+        var lcdName = lcd.CustomName ?? "";
+        foreach (var kvp in INTENT_SUFFIXES)
+        {
+            if (lcdName.StartsWith(kvp.Key, System.StringComparison.OrdinalIgnoreCase))
+            {
+                var newName = _prefix + kvp.Value;
+                lcd.CustomName = newName;
+                sb.AppendLine("[OK] " + lcdName + " -> " + newName);
+                renamed++;
+                foundAnyIntentLcd = true;
+                break;
+            }
+        }
+    }
+
+    if (!foundAnyIntentLcd)
+    {
+        sb.AppendLine("");
+        sb.AppendLine("[!!] No labelled LCDs found.");
+        sb.AppendLine("Label LCDs with intent tags:");
+        sb.AppendLine("  [STATUS]       main overview");
+        sb.AppendLine("  [CREW]         crew vitals");
+        sb.AppendLine("  [SCAN]         scan (combined)");
+        sb.AppendLine("  [SCAN GRIDS]   grids only");
+        sb.AppendLine("  [SCAN ASTEROIDS] asteroids+ore");
+        sb.AppendLine("  [TAGGED]       bookmarks");
+        sb.AppendLine("  [PRESENCE]     online indicator");
+        missing++;
+    }
+
+    // --- Event Controller -> PREFIX Jump Controller ---
+    bool foundEc = false;
+    foreach (var b in allBlocks2)
+    {
+        var typeName2 = b.BlockDefinition.TypeIdString ?? "";
+        if (typeName2.Contains("EventController"))
+        {
+            b.CustomName = _prefix + " Jump Controller";
+            sb.AppendLine("[OK] Event Controller -> " + _prefix + " Jump Controller");
+            renamed++;
+            foundEc = true;
+            break;
+        }
+    }
+    if (!foundEc)
+        sb.AppendLine("[-] No Event Controller found (optional)");
+
+    sb.AppendLine("");
+    sb.AppendLine("Renamed: " + renamed + "  Missing: " + missing);
+    if (missing == 0)
+        sb.AppendLine("Setup complete! Restart server.");
+    else
+        sb.AppendLine("Fix missing items and run SETUP again.");
+
+    // Output to PB display and Echo
+    Echo(sb.ToString());
+    Me.GetSurface(0).WriteText(sb.ToString());
+}
+
+private string EscapeJson(string s)
+{
+    if (s == null) return "";
+    var r = s;
+    r = r.Replace("\\", "[[BS]]");
+    r = r.Replace("\"", "\\\"");
+    r = r.Replace("\n",  "\\n");
+    r = r.Replace("\r",  "\\r");
+    r = r.Replace("[[BS]]", "\\\\");
+    return r;
+}
+
+// ============================================================
+// DATA STRUCTURE
+// ============================================================
+
+private class ShipData
+{
+    public string GridName    = "";
+    public string Timestamp   = "";
+    public float  ShipSpeed   = 0f;
+    public float  ShipMass    = 0f;
+    public float  GravityMagnitude = 0f;
+    public float  TWR         = 0f;
+    public float  HydrogenPct = -1f;
+    public int    HydrogenTanks = 0;
+    public float  OxygenPct   = -1f;
+    public int    OxygenTanks = 0;
+    public float  BatteryPct  = -1f;
+    public int    ReactorCount = 0;
+    public float  ReactorOutput = 0f;
+    public float  ReactorMax   = 0f;
+    public float  ReactorLoadPct = 0f;
+    public int    ThrustersTotal     = 0;
+    public int    ThrustersFunctional = 0;
+    public int    ThrustersDamaged   = 0;
+    public float  ThrustUp    = 0f;
+    public float  ThrustDown  = 0f;
+    public float  ThrustFwd   = 0f;
+    public float  ThrustBack  = 0f;
+    public float  ThrustLeft  = 0f;
+    public float  ThrustRight = 0f;
+    public int    GyrosTotal      = 0;
+    public int    GyrosFunctional = 0;
+    public bool   HasProjector     = false;
+    public int    BlueprintTotal   = 0;
+    public int    BlueprintMissing = 0;
+    public int    BlueprintArmor   = 0;
+    public float  IntegrityPct     = 100f;
+    public int    DamagedBlocks    = 0;
+    public float  WorstBlockPct    = 100f;
+    public string WorstBlockName   = "";
+    // Block inventory -- what this ship has
+    public int    Doors            = 0;
+    public int    DoorsOpen        = 0;
+    public int    LandingGear      = 0;
+    public int    LandingGearLocked = 0;
+    public int    Connectors       = 0;
+    public int    ConnectorsLocked = 0;
+    public int    Turrets          = 0;
+    public int    TurretsEnabled   = 0;
+    public int    Drills           = 0;
+    public int    Welders          = 0;
+    public int    Grinders         = 0;
+    public int    JumpDrives       = 0;
+    public float  JumpDriveCharge  = -1f;
+    public int    Warheads         = 0;
+    public int    Cameras          = 0;
+    public int    Sensors          = 0;
+    public int    Pistons          = 0;
+    public int    Rotors           = 0;
+    public int    AirVents         = 0;
+    public int    Lights           = 0;
+    public int    Antennas         = 0;
+}

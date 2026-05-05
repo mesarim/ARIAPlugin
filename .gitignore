@@ -1,0 +1,27 @@
+# Build outputs
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+
+# Sensitive
+twitch_config.json
+twitch_tokens.json
+aria_config.json
+ARIAPlugin_Nodes.xml
+
+# Logs
+*.log
+training_data/
+
+# OS
+.DS_Store
+Thumbs.db

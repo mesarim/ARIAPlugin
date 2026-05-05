@@ -1,0 +1,17 @@
+{
+  "Name": "Pidgeon",
+  "Version": "0.6.0",
+  "Authors": ["Mesarim"],
+  "Description": "ARIA Fleet Intelligence — ship AI bridge interface for Space Engineers. Enables external AI nodes to inhabit ships, execute commands, read game state, and interact with players via faction chat.",
+  "Repository": "https://github.com/mesarim/pidgeon",
+  "ReleaseLink": "https://github.com/mesarim/pidgeon/releases/latest",
+  "Icon": "https://raw.githubusercontent.com/mesarim/pidgeon/main/icon.png",
+  "Tags": ["AI", "Automation", "Chat", "Fleet", "Navigation"],
+  "Dependencies": [],
+  "Conflicts": [],
+  "MinGameVersion": "1.203",
+  "MinTorchVersion": "0.8",
+  "PluginId": "ark-pidgeon-aria-0001",
+  "EntryPoint": "ARIAPlugin.ARIAPlugin",
+  "AssemblyName": "ARIAPlugin"
+}

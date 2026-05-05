@@ -1,0 +1,743 @@
+// =============================================================================
+// Copyright (c) 2026 Michael John Roll. All Rights Reserved.
+// Project ARIA -- Emotion PB v3.0
+// Eyes-only renderer -- matches aria_emotion_overlay_v10.html
+// Two almond/shape eyes with blink, drift, morph, talk glow
+// =============================================================================
+//
+// SETUP:
+// 1. Place in a Programmable Block named: "{AI} EMOTION PB"
+//    e.g. "ARIA EMOTION PB", "UBER EMOTION PB", "ERIS EMOTION PB"
+// 2. Place an LCD panel named: "{AI} FACE"
+//    Set it to at least 1x1 screen, any size works.
+// 3. Prefix auto-detected from PB name (first word).
+//
+// ARGUMENTS:
+//    EMOTION:neutral | happy | sad | angry | thinking | alert
+//    TALK:on | TALK:off
+// =============================================================================
+
+string _prefix  = "ARIA";
+string _emotion = "neutral";
+string _fromEmotion = "neutral";
+float  _morphT  = 1f;
+bool   _talking = false;
+int    _tick    = 0;
+
+// Blink
+int   _blinkT       = 0;
+int   _nextBlink    = 180;
+int   _blinkState   = 0;   // 0=open 1=closing 2=opening
+float _blinkProgress = 0f;
+
+// Drift
+float _driftX = 0f, _driftY = 0f;
+float _driftTX = 0f, _driftTY = 0f;
+int   _driftTimer = 0;
+
+// Think side
+int _thinkSide  = -1;
+int _thinkTimer = 0;
+
+// Talk
+float _talkPhase = 0f;
+
+IMyTextSurface _surface;
+RectangleF     _viewport;
+Vector2        _center;
+float          _scale = 1f;
+
+const string FACE_SUFFIX = " FACE";
+
+public Program()
+{
+    Runtime.UpdateFrequency = UpdateFrequency.Update1;
+    var pbName = Me.CustomName ?? "ARIA EMOTION PB";
+    int space  = pbName.IndexOf(' ');
+    _prefix    = space > 0 ? pbName.Substring(0, space).ToUpper().Trim() : "ARIA";
+    LoadState();
+    _surface = GetFaceSurface();
+    SetupSurface();
+    _nextBlink = 180 + Rng(180);
+}
+
+public void Save() => Storage = _emotion + "|" + (_talking ? "1" : "0") + "|" + _fromEmotion + "|" + _morphT.ToString("F2");
+
+void LoadState()
+{
+    if (string.IsNullOrWhiteSpace(Storage)) return;
+    var p = Storage.Split('|');
+    if (p.Length > 0) _emotion     = Validated(p[0]);
+    if (p.Length > 1) _talking     = p[1] == "1";
+    if (p.Length > 2) _fromEmotion = Validated(p[2]);
+    if (p.Length > 3) float.TryParse(p[3], out _morphT);
+}
+
+string Validated(string e)
+{
+    e = e.Trim().ToLower();
+    return (e == "neutral" || e == "happy"    || e == "sad" ||
+            e == "angry"   || e == "thinking" || e == "alert") ? e : "neutral";
+}
+
+IMyTextSurface GetFaceSurface()
+{
+    var panel = GridTerminalSystem.GetBlockWithName(_prefix + FACE_SUFFIX) as IMyTextPanel;
+    if (panel != null) return panel as IMyTextSurface;
+    var prov = GridTerminalSystem.GetBlockWithName(_prefix + FACE_SUFFIX) as IMyTextSurfaceProvider;
+    return (prov != null && prov.SurfaceCount > 0) ? prov.GetSurface(0) : null;
+}
+
+void SetupSurface()
+{
+    if (_surface == null) return;
+    _surface.ContentType           = ContentType.SCRIPT;
+    _surface.Script                = "";
+    _surface.BackgroundColor       = new Color(0, 0, 0);
+    _surface.ScriptBackgroundColor = new Color(0, 0, 0);
+    _viewport = new RectangleF((_surface.TextureSize - _surface.SurfaceSize) / 2f, _surface.SurfaceSize);
+    _center   = _viewport.Center;
+    _scale    = Math.Min(_surface.SurfaceSize.X / 280f, _surface.SurfaceSize.Y / 200f);
+}
+
+public void Main(string argument, UpdateType updateSource)
+{
+    if (!string.IsNullOrWhiteSpace(argument)) HandleArgument(argument.Trim());
+    if (_surface == null) _surface = GetFaceSurface();
+    if (_surface == null) { Echo("No LCD: " + _prefix + FACE_SUFFIX); return; }
+    SetupSurface();
+    Tick();
+    Draw();
+    Echo(_prefix + " EMOTION PB v3.0\n" + _emotion.ToUpper() + (_talking ? " [TALK]" : ""));
+}
+
+void HandleArgument(string arg)
+{
+    int col = arg.IndexOf(':');
+    string cmd = col >= 0 ? arg.Substring(0, col).Trim().ToUpper() : arg.ToUpper();
+    string val = col >= 0 ? arg.Substring(col + 1).Trim().ToLower() : "";
+    switch (cmd)
+    {
+        case "EMOTION":
+            var next = Validated(val);
+            if (next != _emotion) { _fromEmotion = _emotion; _emotion = next; _morphT = 0f; }
+            break;
+        case "TALK":
+            _talking = val == "on" || val == "1" || val == "true";
+            break;
+    }
+}
+
+void Tick()
+{
+    _tick++;
+
+    // Morph
+    if (_morphT < 1f) _morphT = Math.Min(1f, _morphT + 0.06f);
+
+    // Blink
+    _blinkT++;
+    if (_blinkT >= _nextBlink && _blinkState == 0)
+        { _blinkState = 1; _blinkProgress = 0f; }
+    if (_blinkState == 1)
+        { _blinkProgress += 0.18f; if (_blinkProgress >= 1f) { _blinkProgress = 1f; _blinkState = 2; } }
+    else if (_blinkState == 2)
+        { _blinkProgress -= 0.12f; if (_blinkProgress <= 0f) { _blinkProgress = 0f; _blinkState = 0; _blinkT = 0; _nextBlink = 180 + Rng(240); } }
+
+    // Think side alternation
+    if (_emotion == "thinking") { _thinkTimer++; if (_thinkTimer > 90) { _thinkSide *= -1; _thinkTimer = 0; } }
+
+    // Drift
+    _driftTimer--;
+    if (_driftTimer <= 0)
+    {
+        _driftTX = (Rng(100) - 50) * 0.06f;
+        _driftTY = (Rng(100) - 50) * 0.03f;
+        _driftTimer = 80 + Rng(120);
+    }
+    _driftX += (_driftTX - _driftX) * 0.02f;
+    _driftY += (_driftTY - _driftY) * 0.02f;
+
+    // Talk
+    if (_talking) _talkPhase += 0.12f;
+}
+
+// ── Draw ─────────────────────────────────────────────────────────────────────
+void Draw()
+{
+    float blinkAmount = (_blinkState == 1 || _blinkState == 2) ? _blinkProgress : 0f;
+    float glowAlpha   = _talking ? (float)(Math.Abs(Math.Sin(_talkPhase)) * 0.7f) : 0f;
+    Color color       = LerpColor(EmotionColor(_fromEmotion), EmotionColor(_emotion), _morphT);
+
+    bool isAngry = _emotion == "angry" || (_fromEmotion == "angry" && _morphT < 0.5f);
+    float spacing = S(isAngry ? 50f : 60f);
+
+    using (var frame = _surface.DrawFrame())
+    {
+        // Black background
+        frame.Add(new MySprite(SpriteType.TEXTURE, "SquareSimple",
+            _center, _viewport.Size, new Color(0, 0, 0)));
+
+        // Left eye
+        DrawEye(frame, _center + new Vector2(-spacing + _driftX * _scale, _driftY * _scale),
+            -1, blinkAmount, glowAlpha, color, isAngry);
+
+        // Right eye
+        DrawEye(frame, _center + new Vector2(spacing + _driftX * _scale, _driftY * _scale),
+            1, blinkAmount, glowAlpha, color, isAngry);
+    }
+}
+
+void DrawEye(MySpriteDrawFrame frame, Vector2 pos, int side,
+    float blinkAmount, float glowAlpha, Color color, bool isAngry)
+{
+    if (isAngry)
+    {
+        DrawAngryEye(frame, pos, side, blinkAmount, color, glowAlpha);
+        return;
+    }
+
+    EyeShape from = GetEyeShape(_fromEmotion, side, false);
+    bool narrowThink = _emotion == "thinking" && side == _thinkSide;
+    EyeShape to   = GetEyeShape(_emotion, side, narrowThink);
+    EyeShape shape = LerpShape(from, to, _morphT);
+
+    float rx = S(shape.Rx);
+    float ry = S(shape.Ry) * (1f - blinkAmount);
+    float bf = shape.BottomFlat;
+
+    if (glowAlpha > 0f)
+    {
+        // Glow: slightly larger, dimmer version behind
+        Color glow = new Color(
+            (int)(color.R * glowAlpha * 0.6f),
+            (int)(color.G * glowAlpha * 0.6f),
+            (int)(color.B * glowAlpha * 0.6f));
+        DrawEyeShape(frame, pos, rx + S(6f), ry + S(4f), shape.Tilt, bf, glow);
+    }
+
+    DrawEyeShape(frame, pos, rx, ry, shape.Tilt, bf, color);
+}
+
+void DrawEyeShape(MySpriteDrawFrame frame, Vector2 pos, float rx, float ry,
+    float tilt, float bottomFlat, Color color)
+{
+    if (bottomFlat > 0.5f)
+    {
+        // Happy dome: approximate with circle + rect mask for flat bottom
+        var circ = new MySprite(SpriteType.TEXTURE, "Circle",
+            pos + new Vector2(0f, -ry * 0.15f),
+            new Vector2(rx * 2f, ry * 2.6f), color);
+        circ.RotationOrScale = tilt;
+        frame.Add(circ);
+        // Mask flat bottom
+        frame.Add(new MySprite(SpriteType.TEXTURE, "SquareSimple",
+            pos + new Vector2(0f, ry * 0.7f),
+            new Vector2(rx * 2.4f, ry * 1.4f), new Color(0, 0, 0)));
+    }
+    else
+    {
+        var eye = new MySprite(SpriteType.TEXTURE, "Circle",
+            pos, new Vector2(rx * 2f, ry * 2f), color);
+        eye.RotationOrScale = tilt;
+        frame.Add(eye);
+    }
+}
+
+void DrawAngryEye(MySpriteDrawFrame frame, Vector2 pos, int side,
+    float blinkAmount, Color color, float glowAlpha)
+{
+    // Parallelogram slab: outer corner higher, inner corner lower
+    float drop = S(24f);
+    float h    = S(20f) * (1f - blinkAmount);
+    float w    = S(92f);
+
+    // Draw as two triangles approximating a parallelogram
+    // Using rotated rectangles at angles
+    float outerY =  drop * 0.5f;
+    float innerY = -drop * 0.5f;
+    float midY   = (outerY + innerY) * 0.5f;
+
+    float rotation = (float)Math.Atan2(innerY - outerY, w) * side;
+
+    var slab = new MySprite(SpriteType.TEXTURE, "SquareSimple",
+        pos + new Vector2(0f, midY + h * 0.5f),
+        new Vector2(w, h), color);
+    slab.RotationOrScale = rotation;
+    frame.Add(slab);
+}
+
+// ── Eye shapes ────────────────────────────────────────────────────────────────
+struct EyeShape { public float Rx, Ry, Tilt, BottomFlat; }
+
+EyeShape GetEyeShape(string em, int side, bool thinkNarrow)
+{
+    switch (em)
+    {
+        case "neutral":  return new EyeShape { Rx=44, Ry=18, Tilt=side*-0.15f, BottomFlat=0 };
+        case "happy":    return new EyeShape { Rx=46, Ry=22, Tilt=0,           BottomFlat=0.85f };
+        case "sad":      return new EyeShape { Rx=42, Ry=16, Tilt=side*0.32f,  BottomFlat=0 };
+        case "thinking": return thinkNarrow
+                            ? new EyeShape { Rx=38, Ry=8,  Tilt=0, BottomFlat=0 }
+                            : new EyeShape { Rx=44, Ry=18, Tilt=0, BottomFlat=0 };
+        case "alert":    return new EyeShape { Rx=40, Ry=28, Tilt=0,           BottomFlat=0 };
+        default:         return new EyeShape { Rx=44, Ry=18, Tilt=0,           BottomFlat=0 };
+    }
+}
+
+EyeShape LerpShape(EyeShape a, EyeShape b, float t)
+{
+    return new EyeShape
+    {
+        Rx         = Lerp(a.Rx,         b.Rx,         t),
+        Ry         = Lerp(a.Ry,         b.Ry,         t),
+        Tilt       = Lerp(a.Tilt,       b.Tilt,       t),
+        BottomFlat = Lerp(a.BottomFlat, b.BottomFlat, t),
+    };
+}
+
+// ── Colours ───────────────────────────────────────────────────────────────────
+Color EmotionColor(string e)
+{
+    switch (e)
+    {
+        case "happy":    return new Color(0,   232, 200);
+        case "sad":      return new Color(72,  152, 232);
+        case "angry":    return new Color(232, 56,  56);
+        case "thinking": return new Color(168, 120, 255);
+        case "alert":    return new Color(240, 160, 32);
+        default:         return new Color(0,   200, 220);
+    }
+}
+
+Color LerpColor(Color a, Color b, float t)
+{
+    return new Color(
+        (int)Lerp(a.R, b.R, t),
+        (int)Lerp(a.G, b.G, t),
+        (int)Lerp(a.B, b.B, t));
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+float S(float v)  => v * _scale;
+float Lerp(float a, float b, float t) => a + (b - a) * t;
+
+static System.Random _rng = new System.Random();
+int Rng(int max) => _rng.Next(max);
+============================================================
+  ARIA NODE SETUP & COMMAND REFERENCE
+  Project ARIA v0.5.6  |  mesarim.uk
+============================================================
+
+--- REQUIRED BLOCKS ---
+[RC]  {AI} CORE
+      Remote Control block. Rename to match your AI.
+      Handles autopilot, dampeners, scan origin.
+
+[PB]  {AI} PB
+      Programmable Block. Script auto-installs on inhabit.
+      Handles sensor relay and block telemetry.
+
+--- OPTIONAL BLOCKS ---
+[LCD] {AI} SCAN          Nearby grids and asteroids
+[LCD] {AI} SCAN GRIDS    Grids only
+[LCD] {AI} SCAN ASTEROIDS  Asteroids only
+[LCD] {AI} CREW          Crew vitals and positions
+[LCD] {AI} TAGGED        Bookmarked objects
+[LCD] {AI} PRESENCE      Online/offline indicator
+[PB]  {AI} EMOTION PB    Eyes sprite renderer
+[AI]  {AI} AI            Native follow (Automaton DLC)
+
+--- HABITATION ---
+  "[AI], inhabit"           Scan for core and claim ship
+  "[AI], reinhabit"         Hard reset -- uninhabit all, rescan
+  "[AI], uninhabit"         Release all ships
+  "[AI], force update"      Refresh all sensors now
+
+--- NAVIGATION ---
+  "[AI], fly to [name]"     Autopilot to named grid/asteroid
+  "[AI], fly to me"         Autopilot to your position
+  "[AI], fly to X,Y,Z"      Autopilot to GPS coordinates
+  "[AI], cancel autopilot"  Disengage autopilot
+  "[AI], stop"              Same as cancel autopilot
+
+  "[AI], go to X then Y then Z"   Multi-point route
+  "[AI], add waypoint [name]"     Queue a waypoint
+  "[AI], start route"             Begin queued route
+  "[AI], abort route"             Cancel active route
+  "[AI], next waypoint"           Skip to next leg now
+
+--- SCANNING ---
+  "[AI], scan"              Trigger medium scan (15km)
+  "[AI], long range scan"   Trigger long scan (25km)
+  "[AI], deep scan"         Ore detector scan
+  "[AI], tag [name]"        Bookmark object in scan DB
+  "[AI], untag [name]"      Remove bookmark
+  "[AI], where is [name]"   Report position from scan DB
+
+--- FLIGHT CONTROLS ---
+  "[AI], dampeners on/off"
+  "[AI], release all"       Zero all overrides, dampeners on
+  "[AI], all stop"          Same as release all
+  "[AI], safety override"   Toggle terrain correction bypass
+
+--- FOLLOWING ---
+  "[AI], follow me"         AI Basic block follows you
+  "[AI], follow [name]"     Follow player or grid by name
+  "[AI], stop following"    Disengage follow
+
+--- SHIP SYSTEMS ---
+  "[AI], landing gear lock/unlock"
+  "[AI], connector connect/disconnect"
+  "[AI], open/close doors"
+  "[AI], lights on/off/alert/normal"
+  "[AI], turrets on/off"
+  "[AI], reactor on/off/status"
+  "[AI], jump drive status/recharge"
+  "[AI], jump to [name]"    Jump drive targeted jump
+  "[AI], drills on/off"
+  "[AI], welders on/off"
+  "[AI], grinders on/off"
+  "[AI], vents pressurise/depressurise"
+  "[AI], dampeners on/off"
+  "[AI], gyro override on/off"
+  "[AI], ship status"       Full ship system report
+
+--- ALERTS ---
+  "[AI], acknowledged"      Snooze alerts (2 min)
+  "[AI], snooze for 5 minutes"   Custom snooze duration
+
+--- JUMP DRIVE ---
+  "[AI], jump to [name]"    Targeted jump (scan DB lookup)
+  "[AI], jump to X,Y,Z"     Targeted jump (GPS coords)
+  "Aria, jump drive jump"   Blind forward jump
+
+============================================================
+  Replace {AI} with your AI name: ARIA / NOVA / BEKA / UBER
+============================================================
+// =============================================================================
+// Copyright (c) 2026 Michael John Roll. All Rights Reserved.
+// Project ARIA -- Emotion PB v3.0
+// Eyes-only renderer -- matches aria_emotion_overlay_v10.html
+// Two almond/shape eyes with blink, drift, morph, talk glow
+// =============================================================================
+//
+// SETUP:
+// 1. Place in a Programmable Block named: "{AI} EMOTION PB"
+//    e.g. "ARIA EMOTION PB", "UBER EMOTION PB", "ERIS EMOTION PB"
+// 2. Place an LCD panel named: "{AI} FACE"
+//    Set it to at least 1x1 screen, any size works.
+// 3. Prefix auto-detected from PB name (first word).
+//
+// ARGUMENTS:
+//    EMOTION:neutral | happy | sad | angry | thinking | alert
+//    TALK:on | TALK:off
+// =============================================================================
+
+string _prefix  = "ARIA";
+string _emotion = "neutral";
+string _fromEmotion = "neutral";
+float  _morphT  = 1f;
+bool   _talking = false;
+int    _tick    = 0;
+
+// Blink
+int   _blinkT       = 0;
+int   _nextBlink    = 180;
+int   _blinkState   = 0;   // 0=open 1=closing 2=opening
+float _blinkProgress = 0f;
+
+// Drift
+float _driftX = 0f, _driftY = 0f;
+float _driftTX = 0f, _driftTY = 0f;
+int   _driftTimer = 0;
+
+// Think side
+int _thinkSide  = -1;
+int _thinkTimer = 0;
+
+// Talk
+float _talkPhase = 0f;
+
+IMyTextSurface _surface;
+RectangleF     _viewport;
+Vector2        _center;
+float          _scale = 1f;
+
+const string FACE_SUFFIX = " FACE";
+
+public Program()
+{
+    Runtime.UpdateFrequency = UpdateFrequency.Update1;
+    var pbName = Me.CustomName ?? "ARIA EMOTION PB";
+    int space  = pbName.IndexOf(' ');
+    _prefix    = space > 0 ? pbName.Substring(0, space).ToUpper().Trim() : "ARIA";
+    LoadState();
+    _surface = GetFaceSurface();
+    SetupSurface();
+    _nextBlink = 180 + Rng(180);
+}
+
+public void Save() => Storage = _emotion + "|" + (_talking ? "1" : "0") + "|" + _fromEmotion + "|" + _morphT.ToString("F2");
+
+void LoadState()
+{
+    if (string.IsNullOrWhiteSpace(Storage)) return;
+    var p = Storage.Split('|');
+    if (p.Length > 0) _emotion     = Validated(p[0]);
+    if (p.Length > 1) _talking     = p[1] == "1";
+    if (p.Length > 2) _fromEmotion = Validated(p[2]);
+    if (p.Length > 3) float.TryParse(p[3], out _morphT);
+}
+
+string Validated(string e)
+{
+    e = e.Trim().ToLower();
+    return (e == "neutral" || e == "happy"    || e == "sad" ||
+            e == "angry"   || e == "thinking" || e == "alert") ? e : "neutral";
+}
+
+IMyTextSurface GetFaceSurface()
+{
+    var panel = GridTerminalSystem.GetBlockWithName(_prefix + FACE_SUFFIX) as IMyTextPanel;
+    if (panel != null) return panel as IMyTextSurface;
+    var prov = GridTerminalSystem.GetBlockWithName(_prefix + FACE_SUFFIX) as IMyTextSurfaceProvider;
+    return (prov != null && prov.SurfaceCount > 0) ? prov.GetSurface(0) : null;
+}
+
+void SetupSurface()
+{
+    if (_surface == null) return;
+    _surface.ContentType           = ContentType.SCRIPT;
+    _surface.Script                = "";
+    _surface.BackgroundColor       = new Color(0, 0, 0);
+    _surface.ScriptBackgroundColor = new Color(0, 0, 0);
+    _viewport = new RectangleF((_surface.TextureSize - _surface.SurfaceSize) / 2f, _surface.SurfaceSize);
+    _center   = _viewport.Center;
+    _scale    = Math.Min(_surface.SurfaceSize.X / 280f, _surface.SurfaceSize.Y / 200f);
+}
+
+public void Main(string argument, UpdateType updateSource)
+{
+    if (!string.IsNullOrWhiteSpace(argument)) HandleArgument(argument.Trim());
+    if (_surface == null) _surface = GetFaceSurface();
+    if (_surface == null) { Echo("No LCD: " + _prefix + FACE_SUFFIX); return; }
+    SetupSurface();
+    Tick();
+    Draw();
+    Echo(_prefix + " EMOTION PB v3.0\n" + _emotion.ToUpper() + (_talking ? " [TALK]" : ""));
+}
+
+void HandleArgument(string arg)
+{
+    int col = arg.IndexOf(':');
+    string cmd = col >= 0 ? arg.Substring(0, col).Trim().ToUpper() : arg.ToUpper();
+    string val = col >= 0 ? arg.Substring(col + 1).Trim().ToLower() : "";
+    switch (cmd)
+    {
+        case "EMOTION":
+            var next = Validated(val);
+            if (next != _emotion) { _fromEmotion = _emotion; _emotion = next; _morphT = 0f; }
+            break;
+        case "TALK":
+            _talking = val == "on" || val == "1" || val == "true";
+            break;
+    }
+}
+
+void Tick()
+{
+    _tick++;
+
+    // Morph
+    if (_morphT < 1f) _morphT = Math.Min(1f, _morphT + 0.06f);
+
+    // Blink
+    _blinkT++;
+    if (_blinkT >= _nextBlink && _blinkState == 0)
+        { _blinkState = 1; _blinkProgress = 0f; }
+    if (_blinkState == 1)
+        { _blinkProgress += 0.18f; if (_blinkProgress >= 1f) { _blinkProgress = 1f; _blinkState = 2; } }
+    else if (_blinkState == 2)
+        { _blinkProgress -= 0.12f; if (_blinkProgress <= 0f) { _blinkProgress = 0f; _blinkState = 0; _blinkT = 0; _nextBlink = 180 + Rng(240); } }
+
+    // Think side alternation
+    if (_emotion == "thinking") { _thinkTimer++; if (_thinkTimer > 90) { _thinkSide *= -1; _thinkTimer = 0; } }
+
+    // Drift
+    _driftTimer--;
+    if (_driftTimer <= 0)
+    {
+        _driftTX = (Rng(100) - 50) * 0.06f;
+        _driftTY = (Rng(100) - 50) * 0.03f;
+        _driftTimer = 80 + Rng(120);
+    }
+    _driftX += (_driftTX - _driftX) * 0.02f;
+    _driftY += (_driftTY - _driftY) * 0.02f;
+
+    // Talk
+    if (_talking) _talkPhase += 0.12f;
+}
+
+// ── Draw ─────────────────────────────────────────────────────────────────────
+void Draw()
+{
+    float blinkAmount = (_blinkState == 1 || _blinkState == 2) ? _blinkProgress : 0f;
+    float glowAlpha   = _talking ? (float)(Math.Abs(Math.Sin(_talkPhase)) * 0.7f) : 0f;
+    Color color       = LerpColor(EmotionColor(_fromEmotion), EmotionColor(_emotion), _morphT);
+
+    bool isAngry = _emotion == "angry" || (_fromEmotion == "angry" && _morphT < 0.5f);
+    float spacing = S(isAngry ? 50f : 60f);
+
+    using (var frame = _surface.DrawFrame())
+    {
+        // Black background
+        frame.Add(new MySprite(SpriteType.TEXTURE, "SquareSimple",
+            _center, _viewport.Size, new Color(0, 0, 0)));
+
+        // Left eye
+        DrawEye(frame, _center + new Vector2(-spacing + _driftX * _scale, _driftY * _scale),
+            -1, blinkAmount, glowAlpha, color, isAngry);
+
+        // Right eye
+        DrawEye(frame, _center + new Vector2(spacing + _driftX * _scale, _driftY * _scale),
+            1, blinkAmount, glowAlpha, color, isAngry);
+    }
+}
+
+void DrawEye(MySpriteDrawFrame frame, Vector2 pos, int side,
+    float blinkAmount, float glowAlpha, Color color, bool isAngry)
+{
+    if (isAngry)
+    {
+        DrawAngryEye(frame, pos, side, blinkAmount, color, glowAlpha);
+        return;
+    }
+
+    EyeShape from = GetEyeShape(_fromEmotion, side, false);
+    bool narrowThink = _emotion == "thinking" && side == _thinkSide;
+    EyeShape to   = GetEyeShape(_emotion, side, narrowThink);
+    EyeShape shape = LerpShape(from, to, _morphT);
+
+    float rx = S(shape.Rx);
+    float ry = S(shape.Ry) * (1f - blinkAmount);
+    float bf = shape.BottomFlat;
+
+    if (glowAlpha > 0f)
+    {
+        // Glow: slightly larger, dimmer version behind
+        Color glow = new Color(
+            (int)(color.R * glowAlpha * 0.6f),
+            (int)(color.G * glowAlpha * 0.6f),
+            (int)(color.B * glowAlpha * 0.6f));
+        DrawEyeShape(frame, pos, rx + S(6f), ry + S(4f), shape.Tilt, bf, glow);
+    }
+
+    DrawEyeShape(frame, pos, rx, ry, shape.Tilt, bf, color);
+}
+
+void DrawEyeShape(MySpriteDrawFrame frame, Vector2 pos, float rx, float ry,
+    float tilt, float bottomFlat, Color color)
+{
+    if (bottomFlat > 0.5f)
+    {
+        // Happy dome: approximate with circle + rect mask for flat bottom
+        var circ = new MySprite(SpriteType.TEXTURE, "Circle",
+            pos + new Vector2(0f, -ry * 0.15f),
+            new Vector2(rx * 2f, ry * 2.6f), color);
+        circ.RotationOrScale = tilt;
+        frame.Add(circ);
+        // Mask flat bottom
+        frame.Add(new MySprite(SpriteType.TEXTURE, "SquareSimple",
+            pos + new Vector2(0f, ry * 0.7f),
+            new Vector2(rx * 2.4f, ry * 1.4f), new Color(0, 0, 0)));
+    }
+    else
+    {
+        var eye = new MySprite(SpriteType.TEXTURE, "Circle",
+            pos, new Vector2(rx * 2f, ry * 2f), color);
+        eye.RotationOrScale = tilt;
+        frame.Add(eye);
+    }
+}
+
+void DrawAngryEye(MySpriteDrawFrame frame, Vector2 pos, int side,
+    float blinkAmount, Color color, float glowAlpha)
+{
+    // Parallelogram slab: outer corner higher, inner corner lower
+    float drop = S(24f);
+    float h    = S(20f) * (1f - blinkAmount);
+    float w    = S(92f);
+
+    // Draw as two triangles approximating a parallelogram
+    // Using rotated rectangles at angles
+    float outerY =  drop * 0.5f;
+    float innerY = -drop * 0.5f;
+    float midY   = (outerY + innerY) * 0.5f;
+
+    float rotation = (float)Math.Atan2(innerY - outerY, w) * side;
+
+    var slab = new MySprite(SpriteType.TEXTURE, "SquareSimple",
+        pos + new Vector2(0f, midY + h * 0.5f),
+        new Vector2(w, h), color);
+    slab.RotationOrScale = rotation;
+    frame.Add(slab);
+}
+
+// ── Eye shapes ────────────────────────────────────────────────────────────────
+struct EyeShape { public float Rx, Ry, Tilt, BottomFlat; }
+
+EyeShape GetEyeShape(string em, int side, bool thinkNarrow)
+{
+    switch (em)
+    {
+        case "neutral":  return new EyeShape { Rx=44, Ry=18, Tilt=side*-0.15f, BottomFlat=0 };
+        case "happy":    return new EyeShape { Rx=46, Ry=22, Tilt=0,           BottomFlat=0.85f };
+        case "sad":      return new EyeShape { Rx=42, Ry=16, Tilt=side*0.32f,  BottomFlat=0 };
+        case "thinking": return thinkNarrow
+                            ? new EyeShape { Rx=38, Ry=8,  Tilt=0, BottomFlat=0 }
+                            : new EyeShape { Rx=44, Ry=18, Tilt=0, BottomFlat=0 };
+        case "alert":    return new EyeShape { Rx=40, Ry=28, Tilt=0,           BottomFlat=0 };
+        default:         return new EyeShape { Rx=44, Ry=18, Tilt=0,           BottomFlat=0 };
+    }
+}
+
+EyeShape LerpShape(EyeShape a, EyeShape b, float t)
+{
+    return new EyeShape
+    {
+        Rx         = Lerp(a.Rx,         b.Rx,         t),
+        Ry         = Lerp(a.Ry,         b.Ry,         t),
+        Tilt       = Lerp(a.Tilt,       b.Tilt,       t),
+        BottomFlat = Lerp(a.BottomFlat, b.BottomFlat, t),
+    };
+}
+
+// ── Colours ───────────────────────────────────────────────────────────────────
+Color EmotionColor(string e)
+{
+    switch (e)
+    {
+        case "happy":    return new Color(0,   232, 200);
+        case "sad":      return new Color(72,  152, 232);
+        case "angry":    return new Color(232, 56,  56);
+        case "thinking": return new Color(168, 120, 255);
+        case "alert":    return new Color(240, 160, 32);
+        default:         return new Color(0,   200, 220);
+    }
+}
+
+Color LerpColor(Color a, Color b, float t)
+{
+    return new Color(
+        (int)Lerp(a.R, b.R, t),
+        (int)Lerp(a.G, b.G, t),
+        (int)Lerp(a.B, b.B, t));
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+float S(float v)  => v * _scale;
+float Lerp(float a, float b, float t) => a + (b - a) * t;
+
+static System.Random _rng = new System.Random();
+int Rng(int max) => _rng.Next(max);
